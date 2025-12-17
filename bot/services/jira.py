@@ -13,6 +13,7 @@ class JiraTask:
     summary: str
     url: str
     status: str
+    assignee: str | None = None
 
 
 class JiraService:
@@ -53,11 +54,23 @@ class JiraService:
         jql = 'assignee = currentUser() AND sprint in openSprints() ORDER BY status ASC'
         return self._search_issues(jql)
 
-    def _search_issues(self, jql: str) -> list[JiraTask]:
+    def get_tasks_created_by_me(self) -> list[JiraTask]:
+        """Получает незавершённые задачи, созданные мной, где исполнитель не я."""
+        jql = (
+            'reporter = currentUser() AND assignee != currentUser() '
+            'AND resolution = Unresolved ORDER BY updated DESC'
+        )
+        return self._search_issues(jql, include_assignee=True)
+
+    def _search_issues(self, jql: str, include_assignee: bool = False) -> list[JiraTask]:
         """Выполняет поиск задач и возвращает список объектов JiraTask."""
+        fields = ["key", "summary", "status"]
+        if include_assignee:
+            fields.append("assignee")
+
         issues = self.client.search_issues(
             jql,
-            fields=["key", "summary", "status"],
+            fields=fields,
             maxResults=self.MAX_RESULTS,
         )
 
@@ -67,6 +80,7 @@ class JiraService:
                 summary=issue.fields.summary,
                 url=f"{settings.jira_url}/browse/{issue.key}",
                 status=issue.fields.status.name,
+                assignee=getattr(issue.fields.assignee, "displayName", None) if include_assignee else None,
             )
             for issue in issues
         ]

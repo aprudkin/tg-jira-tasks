@@ -15,7 +15,8 @@ async def cmd_start(message: Message) -> None:
         "Jira Tasks Bot\n\n"
         "Available commands:\n"
         "/inwork - Show my tasks in progress\n"
-        "/sprint - Show my tasks in active sprint"
+        "/sprint - Show my tasks in active sprint\n"
+        "/byme - Show unresolved tasks created by me (assigned to others)"
     )
 
 
@@ -83,5 +84,29 @@ async def cmd_sprint(message: Message) -> None:
         lines.append(f"\n{hbold(status)}:")
         for task in status_tasks:
             lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("byme"))
+async def cmd_byme(message: Message) -> None:
+    """Обработчик команды /byme - показывает незавершённые задачи, созданные мной."""
+    await message.answer("Loading tasks...")
+
+    try:
+        tasks = jira_service.get_tasks_created_by_me()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No unresolved tasks created by you (assigned to others).")
+        return
+
+    lines = [hbold("Tasks created by me (assigned to others):"), ""]
+    for task in tasks:
+        assignee = task.assignee or "Unassigned"
+        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+        lines.append(f"  └ {assignee} ({task.status})")
 
     await message.answer("\n".join(lines))
