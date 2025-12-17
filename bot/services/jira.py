@@ -12,6 +12,7 @@ class JiraTask:
     key: str
     summary: str
     url: str
+    status: str
 
 
 class JiraService:
@@ -35,10 +36,18 @@ class JiraService:
     def get_my_tasks_in_progress(self) -> list[JiraTask]:
         """Получает задачи текущего пользователя в статусе 'In Progress'."""
         jql = 'assignee = currentUser() AND status = "In Progress"'
-        # Запрашиваем только необходимые поля для оптимизации
+        return self._search_issues(jql)
+
+    def get_my_tasks_in_sprint(self) -> list[JiraTask]:
+        """Получает задачи текущего пользователя в активных спринтах."""
+        jql = 'assignee = currentUser() AND sprint in openSprints() ORDER BY status ASC'
+        return self._search_issues(jql)
+
+    def _search_issues(self, jql: str) -> list[JiraTask]:
+        """Выполняет поиск задач и возвращает список объектов JiraTask."""
         issues = self.client.search_issues(
             jql,
-            fields=["key", "summary"],
+            fields=["key", "summary", "status"],
             maxResults=self.MAX_RESULTS,
         )
 
@@ -47,6 +56,7 @@ class JiraService:
                 key=issue.key,
                 summary=issue.fields.summary,
                 url=f"{settings.jira_url}/browse/{issue.key}",
+                status=issue.fields.status.name,
             )
             for issue in issues
         ]
