@@ -1,10 +1,10 @@
 from aiogram import Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.utils.markdown import hbold, hlink
 
 from bot.services.jira import jira_service
-from bot.services.notifications import notification_service
+from bot.services.notifications import notification_service, NotificationService
 
 router = Router()
 
@@ -18,7 +18,7 @@ async def cmd_start(message: Message) -> None:
         "/inwork - Show my tasks in progress\n"
         "/sprint - Show my tasks in active sprint\n"
         "/byme - Show unresolved tasks created by me (assigned to others)\n"
-        "/sync - Enable Jira notifications (every 5 min)\n"
+        "/sync [X] - Enable Jira notifications (every X min, default 30)\n"
         "/unsync - Disable Jira notifications"
     )
 
@@ -116,18 +116,38 @@ async def cmd_byme(message: Message) -> None:
 
 
 @router.message(Command("sync"))
-async def cmd_sync(message: Message) -> None:
+async def cmd_sync(message: Message, command: CommandObject) -> None:
     """Обработчик команды /sync - включает уведомления о событиях Jira."""
     chat_id = message.chat.id
 
     if notification_service.is_subscribed(chat_id):
-        await message.answer("Notifications are already enabled.")
+        current_interval = notification_service.get_interval(chat_id)
+        await message.answer(
+            f"Notifications are already enabled (every {current_interval} min).\n"
+            "Use /unsync to disable first."
+        )
         return
 
-    if notification_service.subscribe(chat_id):
+    # Парсим интервал из аргумента команды
+    interval_minutes: int | None = None
+    if command.args:
+        try:
+            interval_minutes = int(command.args.strip())
+            if interval_minutes < 1:
+                await message.answer("Interval must be at least 1 minute.")
+                return
+        except ValueError:
+            await message.answer(
+                "Invalid interval. Usage: /sync [minutes]\n"
+                f"Example: /sync 15 (default: {NotificationService.DEFAULT_INTERVAL_MINUTES})"
+            )
+            return
+
+    if notification_service.subscribe(chat_id, interval_minutes):
+        actual_interval = interval_minutes or NotificationService.DEFAULT_INTERVAL_MINUTES
         await message.answer(
-            "✅ Notifications enabled!\n\n"
-            "You will receive updates every 5 minutes:\n"
+            f"✅ Notifications enabled!\n\n"
+            f"You will receive updates every {actual_interval} minutes:\n"
             "- New comments on your tasks\n"
             "- Status changes by others\n"
             "- New task assignments\n\n"
