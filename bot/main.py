@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 from bot.config import settings
 from bot.handlers import tasks
 from bot.middlewares.auth import AuthMiddleware
+from bot.services.notifications import notification_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,10 +30,15 @@ async def main() -> None:
     dp.message.middleware(AuthMiddleware())
     dp.include_router(tasks.router)
 
+    # Запуск сервиса уведомлений
+    notification_service.start(bot)
+
     logger.info("Starting bot...")
     try:
         await dp.start_polling(bot)
     finally:
+        # Остановка сервиса уведомлений
+        notification_service.stop()
         # Корректное завершение сессии бота
         await bot.session.close()
 

@@ -4,6 +4,7 @@ from aiogram.types import Message
 from aiogram.utils.markdown import hbold, hlink
 
 from bot.services.jira import jira_service
+from bot.services.notifications import notification_service
 
 router = Router()
 
@@ -16,7 +17,9 @@ async def cmd_start(message: Message) -> None:
         "Available commands:\n"
         "/inwork - Show my tasks in progress\n"
         "/sprint - Show my tasks in active sprint\n"
-        "/byme - Show unresolved tasks created by me (assigned to others)"
+        "/byme - Show unresolved tasks created by me (assigned to others)\n"
+        "/sync - Enable Jira notifications (every 5 min)\n"
+        "/unsync - Disable Jira notifications"
     )
 
 
@@ -110,3 +113,40 @@ async def cmd_byme(message: Message) -> None:
         lines.append(f"  └ {assignee} ({task.status})")
 
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("sync"))
+async def cmd_sync(message: Message) -> None:
+    """Обработчик команды /sync - включает уведомления о событиях Jira."""
+    chat_id = message.chat.id
+
+    if notification_service.is_subscribed(chat_id):
+        await message.answer("Notifications are already enabled.")
+        return
+
+    if notification_service.subscribe(chat_id):
+        await message.answer(
+            "✅ Notifications enabled!\n\n"
+            "You will receive updates every 5 minutes:\n"
+            "- New comments on your tasks\n"
+            "- Status changes by others\n"
+            "- New task assignments\n\n"
+            "Use /unsync to disable."
+        )
+    else:
+        await message.answer("Failed to enable notifications.")
+
+
+@router.message(Command("unsync"))
+async def cmd_unsync(message: Message) -> None:
+    """Обработчик команды /unsync - отключает уведомления."""
+    chat_id = message.chat.id
+
+    if not notification_service.is_subscribed(chat_id):
+        await message.answer("Notifications are not enabled.")
+        return
+
+    if notification_service.unsubscribe(chat_id):
+        await message.answer("🔕 Notifications disabled.")
+    else:
+        await message.answer("Failed to disable notifications.")
