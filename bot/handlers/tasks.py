@@ -121,7 +121,7 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
     chat_id = message.chat.id
 
     if notification_service.is_subscribed(chat_id):
-        current_interval = notification_service.get_interval(chat_id)
+        current_interval = notification_service.get_interval()
         await message.answer(
             f"Notifications are already enabled (every {current_interval} min).\n"
             "Use /unsync to disable first."

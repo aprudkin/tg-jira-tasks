@@ -15,41 +15,40 @@ class NotificationService:
 
     # Интервал проверки по умолчанию в минутах
     DEFAULT_INTERVAL_MINUTES = 30
-    # Минимальный интервал проверки цикла в секундах
-    MIN_CHECK_INTERVAL = 60
 
     def __init__(self) -> None:
-        # Словарь подписок: chat_id -> (datetime последней проверки, интервал в минутах)
-        self._subscriptions: dict[int, tuple[datetime, int]] = {}
+        self._chat_id: int | None = None
+        self._last_check: datetime | None = None
+        self._interval_minutes: int = self.DEFAULT_INTERVAL_MINUTES
         self._task: asyncio.Task | None = None
         self._bot: Bot | None = None
 
     def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
-        """Подписывает пользователя на уведомления с указанным интервалом."""
-        if chat_id in self._subscriptions:
+        """Подписывает на уведомления с указанным интервалом."""
+        if self._chat_id is not None:
             return False
-        interval = interval_minutes or self.DEFAULT_INTERVAL_MINUTES
-        self._subscriptions[chat_id] = (datetime.now(), interval)
-        logger.info(f"User {chat_id} subscribed to notifications (interval: {interval} min)")
+        self._chat_id = chat_id
+        self._last_check = datetime.now()
+        self._interval_minutes = interval_minutes or self.DEFAULT_INTERVAL_MINUTES
+        logger.info(f"Subscribed to notifications (interval: {self._interval_minutes} min)")
         return True
 
     def unsubscribe(self, chat_id: int) -> bool:
-        """Отписывает пользователя от уведомлений."""
-        if chat_id not in self._subscriptions:
+        """Отписывает от уведомлений."""
+        if self._chat_id != chat_id:
             return False
-        del self._subscriptions[chat_id]
-        logger.info(f"User {chat_id} unsubscribed from notifications")
+        self._chat_id = None
+        self._last_check = None
+        logger.info("Unsubscribed from notifications")
         return True
 
     def is_subscribed(self, chat_id: int) -> bool:
         """Проверяет, подписан ли пользователь."""
-        return chat_id in self._subscriptions
+        return self._chat_id == chat_id
 
-    def get_interval(self, chat_id: int) -> int | None:
-        """Возвращает интервал проверки для пользователя в минутах."""
-        if chat_id in self._subscriptions:
-            return self._subscriptions[chat_id][1]
-        return None
+    def get_interval(self) -> int:
+        """Возвращает текущий интервал проверки в минутах."""
+        return self._interval_minutes
 
     def start(self, bot: Bot) -> None:
         """Запускает фоновую задачу проверки уведомлений."""
@@ -68,42 +67,32 @@ class NotificationService:
         """Цикл проверки уведомлений."""
         while True:
             try:
-                await asyncio.sleep(self.MIN_CHECK_INTERVAL)
-                await self._check_all_subscriptions()
+                # Ждём интервал в секундах
+                await asyncio.sleep(self._interval_minutes * 60)
+                await self._check_notifications()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in notification loop: {e}")
 
-    async def _check_all_subscriptions(self) -> None:
-        """Проверяет уведомления для всех подписчиков."""
-        if not self._bot or not self._subscriptions:
+    async def _check_notifications(self) -> None:
+        """Проверяет уведомления."""
+        if not self._bot or self._chat_id is None or self._last_check is None:
             return
 
-        now = datetime.now()
+        try:
+            events = await asyncio.to_thread(
+                jira_service.get_events_since, self._last_check
+            )
 
-        # Копируем для безопасной итерации
-        subscriptions = dict(self._subscriptions)
+            if events:
+                await self._send_events(self._chat_id, events)
 
-        for chat_id, (last_check, interval_minutes) in subscriptions.items():
-            try:
-                # Проверяем, прошёл ли интервал с момента последней проверки
-                elapsed_minutes = (now - last_check).total_seconds() / 60
-                if elapsed_minutes < interval_minutes:
-                    continue
+            # Обновляем время последней проверки
+            self._last_check = datetime.now()
 
-                events = await asyncio.to_thread(
-                    jira_service.get_events_since, last_check
-                )
-
-                if events:
-                    await self._send_events(chat_id, events)
-
-                # Обновляем время последней проверки, сохраняя интервал
-                self._subscriptions[chat_id] = (datetime.now(), interval_minutes)
-
-            except Exception as e:
-                logger.error(f"Error checking events for {chat_id}: {e}")
+        except Exception as e:
+            logger.error(f"Error checking events: {e}")
 
     async def _send_events(self, chat_id: int, events: list[JiraEvent]) -> None:
         """Отправляет уведомления о событиях пользователю."""
