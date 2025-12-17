@@ -50,3 +50,10 @@ docker-compose.override.yml
 
 # Logs
 *.log
+
+# AI
+.claude/
+.mcp.json
+.agent/
+CLAUDE.md
+ANTIGRAVITY.md
