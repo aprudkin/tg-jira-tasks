@@ -22,16 +22,26 @@ class JiraService:
     MAX_RESULTS = 100
 
     def __init__(self) -> None:
-        if settings.jira_pat:
-            self.client = JIRA(
-                server=settings.jira_url,
-                token_auth=settings.jira_pat,
-            )
-        else:
-            self.client = JIRA(
-                server=settings.jira_url,
-                basic_auth=(settings.jira_email, settings.jira_api_token),
-            )
+        self._client = None
+        # Проверяем наличие конфигурации при инициализации, но не подключаемся
+        if not (settings.jira_pat or (settings.jira_email and settings.jira_api_token)):
+            raise ValueError("Jira configuration missing: enable JIRA_PAT or JIRA_EMAIL/JIRA_API_TOKEN")
+
+    @property
+    def client(self) -> JIRA:
+        """Ленивая инициализация клиента Jira."""
+        if self._client is None:
+            if settings.jira_pat:
+                self._client = JIRA(
+                    server=settings.jira_url,
+                    token_auth=settings.jira_pat,
+                )
+            else:
+                self._client = JIRA(
+                    server=settings.jira_url,
+                    basic_auth=(settings.jira_email, settings.jira_api_token),
+                )
+        return self._client
 
     def get_my_tasks_in_progress(self) -> list[JiraTask]:
         """Получает задачи текущего пользователя в статусе 'In Progress'."""
