@@ -21,10 +21,16 @@ class JiraService:
     MAX_RESULTS = 100
 
     def __init__(self) -> None:
-        self.client = JIRA(
-            server=settings.jira_url,
-            basic_auth=(settings.jira_email, settings.jira_api_token),
-        )
+        if settings.jira_pat:
+            self.client = JIRA(
+                server=settings.jira_url,
+                token_auth=settings.jira_pat,
+            )
+        else:
+            self.client = JIRA(
+                server=settings.jira_url,
+                basic_auth=(settings.jira_email, settings.jira_api_token),
+            )
 
     def get_my_tasks_in_progress(self) -> list[JiraTask]:
         """Получает задачи текущего пользователя в статусе 'In Progress'."""

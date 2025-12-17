@@ -60,6 +60,7 @@ Telegram bot (aiogram 3.x) that integrates with Jira to fetch user's tasks.
 Required in `.env` (see `.env.example`):
 - `TELEGRAM_TOKEN` - Bot token from @BotFather
 - `JIRA_URL` - Jira server URL
-- `JIRA_EMAIL` - Jira account email
-- `JIRA_API_TOKEN` - Jira API token
+- `JIRA_EMAIL` - Jira account email (Optional if PAT used)
+- `JIRA_API_TOKEN` - Jira API token (Optional if PAT used)
+- `JIRA_PAT` - Jira Personal Access Token (For Data Center/Server)
 - `ALLOWED_USERS` - Comma-separated Telegram user IDs (empty = allow all)

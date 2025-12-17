@@ -6,7 +6,7 @@ Telegram-бот для получения задач из Jira. Показыва
 
 - Docker
 - Telegram Bot Token (от [@BotFather](https://t.me/BotFather))
-- Jira API Token
+- Jira API Token (для Cloud) или Personal Access Token (для Data Center/Server)
 
 ## Установка
 
@@ -27,8 +27,9 @@ cp .env.example .env
 ```env
 TELEGRAM_TOKEN=your_telegram_bot_token
 JIRA_URL=https://your-jira-instance.atlassian.net
-JIRA_EMAIL=your_email@company.com
-JIRA_API_TOKEN=your_jira_api_token
+JIRA_EMAIL=your_email@company.com  # Обязательно для Cloud, не нужно для PAT
+JIRA_API_TOKEN=your_jira_api_token # Для Cloud
+JIRA_PAT=your_personal_access_token # Для Data Center / Server (имеет приоритет над Email/API Token)
 ALLOWED_USERS=123456789,987654321
 ```
 
@@ -39,10 +40,15 @@ ALLOWED_USERS=123456789,987654321
 2. Отправьте `/newbot` и следуйте инструкциям
 3. Скопируйте полученный токен
 
-**Jira API Token:**
+**Jira API Token (Cloud):**
 1. Перейдите в [Atlassian Account Settings](https://id.atlassian.com/manage-profile/security/api-tokens)
 2. Нажмите "Create API token"
 3. Скопируйте токен
+
+**Jira Personal Access Token (Data Center / Server):**
+1. Перейдите в ваш профиль Jira -> Personal Access Tokens
+2. Создайте новый токен
+3. Скопируйте токен и используйте в переменной `JIRA_PAT`
 
 **Telegram User ID:**
 - Отправьте сообщение боту [@userinfobot](https://t.me/userinfobot) для получения вашего ID
@@ -78,8 +84,9 @@ docker-compose up -d --build
 |------------|----------|--------------|
 | `TELEGRAM_TOKEN` | Токен Telegram бота | Да |
 | `JIRA_URL` | URL Jira сервера | Да |
-| `JIRA_EMAIL` | Email аккаунта Jira | Да |
-| `JIRA_API_TOKEN` | API токен Jira | Да |
+| `JIRA_EMAIL` | Email аккаунта Jira (для Cloud) | Да (если нет PAT) |
+| `JIRA_API_TOKEN` | API токен Jira (для Cloud) | Да (если нет PAT) |
+| `JIRA_PAT` | Personal Access Token (для DC/Server) | Да (если нет Cloud auth) |
 | `ALLOWED_USERS` | ID пользователей через запятую (пусто = все) | Нет |
 
 

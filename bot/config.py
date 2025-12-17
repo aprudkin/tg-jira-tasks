@@ -11,8 +11,9 @@ class Settings(BaseSettings):
 
     telegram_token: str
     jira_url: str
-    jira_email: str
-    jira_api_token: str
+    jira_email: str | None = None
+    jira_api_token: str | None = None
+    jira_pat: str | None = None
     allowed_users: str = ""
 
     @property
