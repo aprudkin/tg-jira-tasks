@@ -4,13 +4,13 @@ Telegram-бот для получения задач из Jira. Показыва
 
 ## Требования
 
-- Python 3.11+
+- Docker
 - Telegram Bot Token (от [@BotFather](https://t.me/BotFather))
 - Jira API Token
 
 ## Установка
 
-### Локальная установка
+## Настройка
 
 1. Клонируйте репозиторий:
 ```bash
@@ -18,22 +18,12 @@ git clone <repository-url>
 cd tg-jira-tasks
 ```
 
-2. Создайте виртуальное окружение и установите зависимости:
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# или
-venv\Scripts\activate  # Windows
-
-pip install -r requirements.txt
-```
-
-3. Создайте файл `.env` на основе примера:
+2. Создайте файл `.env` на основе примера:
 ```bash
 cp .env.example .env
 ```
 
-4. Заполните переменные окружения в `.env`:
+3. Заполните переменные окружения в `.env`:
 ```env
 TELEGRAM_TOKEN=your_telegram_bot_token
 JIRA_URL=https://your-jira-instance.atlassian.net
@@ -59,11 +49,7 @@ ALLOWED_USERS=123456789,987654321
 
 ## Запуск
 
-### Локальный запуск
-
-```bash
-python -m bot.main
-```
+## Запуск
 
 ### Docker
 

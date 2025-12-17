@@ -40,9 +40,6 @@ docker run --env-file .env tg-jira-bot
 # Run with docker-compose
 docker-compose up --build
 
-# Run locally (for development)
-pip install -r requirements.txt
-python -m bot.main
 ```
 
 ## Architecture
