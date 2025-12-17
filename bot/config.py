@@ -1,0 +1,26 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Настройки приложения, загружаемые из переменных окружения."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
+
+    telegram_token: str
+    jira_url: str
+    jira_email: str
+    jira_api_token: str
+    allowed_users: str = ""
+
+    @property
+    def allowed_user_ids(self) -> list[int]:
+        """Преобразует строку allowed_users в список ID пользователей."""
+        if not self.allowed_users:
+            return []
+        return [int(uid.strip()) for uid in self.allowed_users.split(",") if uid.strip()]
+
+
+settings = Settings()
