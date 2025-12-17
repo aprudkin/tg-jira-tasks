@@ -15,11 +15,15 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Jira Tasks Bot\n\n"
         "Available commands:\n"
-        "/inwork - Show my tasks in progress\n"
-        "/sprint - Show my tasks in active sprint\n"
-        "/byme - Show unresolved tasks created by me (assigned to others)\n"
-        "/sync [X] - Enable Jira notifications (every X min, default 30)\n"
-        "/unsync - Disable Jira notifications"
+        "/inwork - Tasks in progress\n"
+        "/todo - Tasks in backlog\n"
+        "/sprint - Tasks in active sprint\n"
+        "/recent - Tasks updated in last 24h\n"
+        "/watching - Tasks I'm watching\n"
+        "/byme - Tasks created by me (assigned to others)\n"
+        "/stats - Task statistics\n"
+        "/sync [X] - Enable notifications (every X min, default 30)\n"
+        "/unsync - Disable notifications"
     )
 
 
@@ -111,6 +115,97 @@ async def cmd_byme(message: Message) -> None:
         assignee = task.assignee or "Unassigned"
         lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
         lines.append(f"  └ {assignee} ({task.status})")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("todo"))
+async def cmd_todo(message: Message) -> None:
+    """Обработчик команды /todo - показывает задачи в бэклоге."""
+    await message.answer("Loading tasks...")
+
+    try:
+        tasks = jira_service.get_todo_tasks()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No tasks in backlog (To Do / Backlog / Open).")
+        return
+
+    lines = [hbold("My backlog tasks:"), ""]
+    for task in tasks:
+        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("recent"))
+async def cmd_recent(message: Message) -> None:
+    """Обработчик команды /recent - показывает недавно обновлённые задачи."""
+    await message.answer("Loading tasks...")
+
+    try:
+        tasks = jira_service.get_recent_tasks(hours=24)
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No tasks updated in the last 24 hours.")
+        return
+
+    lines = [hbold("Tasks updated in last 24h:"), ""]
+    for task in tasks:
+        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+        lines.append(f"  └ {task.status}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("watching"))
+async def cmd_watching(message: Message) -> None:
+    """Обработчик команды /watching - показывает задачи, которые я отслеживаю."""
+    await message.answer("Loading tasks...")
+
+    try:
+        tasks = jira_service.get_watching_tasks()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("You are not watching any unresolved tasks.")
+        return
+
+    lines = [hbold("Tasks I'm watching:"), ""]
+    for task in tasks:
+        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+        lines.append(f"  └ {task.status}")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    """Обработчик команды /stats - показывает статистику по задачам."""
+    await message.answer("Loading stats...")
+
+    try:
+        stats = jira_service.get_stats()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    lines = [
+        hbold("📊 My task statistics:"),
+        "",
+        f"🔵 In Progress: {stats.in_progress}",
+        f"📋 Backlog: {stats.in_backlog}",
+        f"✅ Resolved this week: {stats.resolved_this_week}",
+        f"📌 Total open: {stats.total_assigned}",
+    ]
 
     await message.answer("\n".join(lines))
 

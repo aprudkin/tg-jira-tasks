@@ -41,6 +41,16 @@ class JiraEvent:
     timestamp: datetime = field(default_factory=datetime.now)
 
 
+@dataclass
+class JiraStats:
+    """Статистика по задачам."""
+
+    in_progress: int
+    in_backlog: int
+    resolved_this_week: int
+    total_assigned: int
+
+
 class JiraService:
     """Сервис для работы с Jira API."""
 
@@ -86,6 +96,64 @@ class JiraService:
             'AND resolution = Unresolved ORDER BY updated DESC'
         )
         return self._search_issues(jql, include_assignee=True)
+
+    def get_recent_tasks(self, hours: int = 24) -> list[JiraTask]:
+        """Получает задачи, обновлённые за последние N часов."""
+        jql = (
+            f'assignee = currentUser() AND updated >= -{hours}h '
+            'ORDER BY updated DESC'
+        )
+        return self._search_issues(jql)
+
+    def get_todo_tasks(self) -> list[JiraTask]:
+        """Получает задачи в статусах To Do / Backlog."""
+        jql = (
+            'assignee = currentUser() AND status in ("To Do", "Backlog", "Open") '
+            'AND resolution = Unresolved ORDER BY priority DESC, created ASC'
+        )
+        return self._search_issues(jql)
+
+    def get_watching_tasks(self) -> list[JiraTask]:
+        """Получает задачи, которые я отслеживаю (watcher)."""
+        jql = (
+            'watcher = currentUser() AND resolution = Unresolved '
+            'ORDER BY updated DESC'
+        )
+        return self._search_issues(jql)
+
+    def get_stats(self) -> JiraStats:
+        """Получает статистику по задачам."""
+        # Задачи в работе
+        in_progress = self.client.search_issues(
+            'assignee = currentUser() AND status = "In Progress"',
+            maxResults=0,
+        ).total
+
+        # Задачи в бэклоге
+        in_backlog = self.client.search_issues(
+            'assignee = currentUser() AND status in ("To Do", "Backlog", "Open") '
+            'AND resolution = Unresolved',
+            maxResults=0,
+        ).total
+
+        # Закрыто за эту неделю
+        resolved_this_week = self.client.search_issues(
+            'assignee = currentUser() AND resolved >= startOfWeek()',
+            maxResults=0,
+        ).total
+
+        # Всего открытых задач
+        total_assigned = self.client.search_issues(
+            'assignee = currentUser() AND resolution = Unresolved',
+            maxResults=0,
+        ).total
+
+        return JiraStats(
+            in_progress=in_progress,
+            in_backlog=in_backlog,
+            resolved_this_week=resolved_this_week,
+            total_assigned=total_assigned,
+        )
 
     def _search_issues(self, jql: str, include_assignee: bool = False) -> list[JiraTask]:
         """Выполняет поиск задач и возвращает список объектов JiraTask."""
