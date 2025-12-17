@@ -114,13 +114,14 @@ class JiraService:
         return self._search_issues(jql)
 
     def get_watching_tasks(self) -> list[JiraTask]:
-        """Получает незакрытые задачи, которые я отслеживаю (watcher)."""
+        """Получает незакрытые задачи, которые я отслеживаю (watcher), где исполнитель не я."""
         jql = (
-            'watcher = currentUser() AND resolution = Unresolved '
+            'watcher = currentUser() AND assignee != currentUser() '
+            'AND resolution = Unresolved '
             'AND status not in (Done, Closed, Resolved) '
             'ORDER BY updated DESC'
         )
-        return self._search_issues(jql)
+        return self._search_issues(jql, include_assignee=True)
 
     def get_stats(self) -> JiraStats:
         """Получает статистику по задачам."""

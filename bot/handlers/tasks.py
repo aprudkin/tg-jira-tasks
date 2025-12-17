@@ -176,13 +176,14 @@ async def cmd_watching(message: Message) -> None:
         return
 
     if not tasks:
-        await message.answer("You are not watching any unresolved tasks.")
+        await message.answer("You are not watching any unresolved tasks (assigned to others).")
         return
 
     lines = [hbold("Tasks I'm watching:"), ""]
     for task in tasks:
+        assignee = task.assignee or "Unassigned"
         lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
-        lines.append(f"  └ {task.status}")
+        lines.append(f"  └ {assignee} ({task.status})")
 
     await message.answer("\n".join(lines))
 
