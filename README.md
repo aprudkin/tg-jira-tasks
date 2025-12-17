@@ -47,10 +47,6 @@ ALLOWED_USERS=123456789,987654321
 **Telegram User ID:**
 - Отправьте сообщение боту [@userinfobot](https://t.me/userinfobot) для получения вашего ID
 
-## Запуск
-
-## Запуск
-
 ### Docker
 
 ```bash
