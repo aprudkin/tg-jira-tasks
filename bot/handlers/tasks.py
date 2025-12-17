@@ -14,13 +14,13 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Jira Tasks Bot\n\n"
         "Available commands:\n"
-        "/tasks - Show my tasks in progress"
+        "/opened - Show my tasks in progress"
     )
 
 
-@router.message(Command("tasks"))
-async def cmd_tasks(message: Message) -> None:
-    """Обработчик команды /tasks - показывает задачи в работе."""
+@router.message(Command("opened"))
+async def cmd_opened(message: Message) -> None:
+    """Обработчик команды /opened - показывает задачи в работе."""
     await message.answer("Loading tasks...")
 
     try:
