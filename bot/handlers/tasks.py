@@ -66,6 +66,19 @@ async def cmd_sprint(message: Message) -> None:
 
     lines = [hbold("My sprint tasks:"), ""]
 
+    # Порядок сортировки статусов
+    status_order = ["In Progress", "Discussion", "Hold", "Backlog", "Resolved"]
+
+    # Сначала выводим статусы из предопределенного порядка
+    for status in status_order:
+        if status in tasks_by_status:
+            lines.append(f"\n{hbold(status)}:")
+            for task in tasks_by_status[status]:
+                lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+            # Удаляем обработанный статус, чтобы не вывести его повторно
+            del tasks_by_status[status]
+
+    # Затем выводим оставшиеся статусы (если есть)
     for status, status_tasks in tasks_by_status.items():
         lines.append(f"\n{hbold(status)}:")
         for task in status_tasks:
