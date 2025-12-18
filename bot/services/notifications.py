@@ -27,6 +27,11 @@ class NotificationService:
         self._interval_minutes: int = self.DEFAULT_INTERVAL_MINUTES
         self._task: asyncio.Task | None = None
         self._bot: Bot | None = None
+        # Словарь для хранения ID обработанных событий по задачам
+        # {issue_key: set(event_ids)}
+        self._processed_events: dict[str, set[str]] = {}
+        # Множество пользователей, от которых уведомления приходят без звука
+        self._silent_users: set[str] = set()
         # Загружаем сохранённое состояние при инициализации
         self._load_state()
 
@@ -37,6 +42,25 @@ class NotificationService:
                 data = json.loads(STATE_FILE.read_text())
                 self._chat_id = data.get("chat_id")
                 self._interval_minutes = data.get("interval_minutes", self.DEFAULT_INTERVAL_MINUTES)
+                # Загружаем ID уже отправленных событий
+                # Поддержка миграции со старого формата (список)
+                raw_processed = data.get("processed_events", data.get("processed_ids", []))
+
+                if isinstance(raw_processed, list):
+                    # Старый формат: просто список ID, без привязки к задачам
+                    # Очищаем, так как не можем привязать к задачам
+                    self._processed_events = {}
+                elif isinstance(raw_processed, dict):
+                    # Новый формат: {issue_key: [id1, id2]}
+                    self._processed_events = {
+                        k: set(v) for k, v in raw_processed.items()
+                    }
+                else:
+                    self._processed_events = {}
+
+                # Загружаем silent_users
+                self._silent_users = set(data.get("silent_users", []))
+
                 # last_check ставим на текущее время, чтобы не слать старые уведомления
                 if self._chat_id is not None:
                     self._last_check = datetime.now()
@@ -51,6 +75,11 @@ class NotificationService:
             data = {
                 "chat_id": self._chat_id,
                 "interval_minutes": self._interval_minutes,
+                # Преобразуем сеты в списки для JSON
+                "processed_events": {
+                    k: list(v)[-50:] for k, v in self._processed_events.items()
+                },
+                "silent_users": list(self._silent_users),
             }
             STATE_FILE.write_text(json.dumps(data))
             logger.info("Subscription state saved")
@@ -85,6 +114,24 @@ class NotificationService:
     def get_interval(self) -> int:
         """Возвращает текущий интервал проверки в минутах."""
         return self._interval_minutes
+
+    def mute_user(self, username: str) -> None:
+        """Добавляет пользователя в список тихих."""
+        self._silent_users.add(username)
+        self._save_state()
+
+    def unmute_user(self, username: str) -> None:
+        """Убирает пользователя из списка тихих."""
+        self._silent_users.discard(username)
+        self._save_state()
+
+    def is_user_silent(self, username: str) -> bool:
+        """Проверяет, находится ли пользователь в списке тихих."""
+        return username in self._silent_users
+
+    def get_silent_users(self) -> set[str]:
+        """Возвращает список тихих пользователей."""
+        return self._silent_users
 
     def start(self, bot: Bot) -> None:
         """Запускает фоновую задачу проверки уведомлений."""
@@ -122,7 +169,34 @@ class NotificationService:
             )
 
             if events:
-                await self._send_events(self._chat_id, events)
+                # Фильтруем события, которые уже были отправлены
+                new_events = []
+                for event in events:
+                    # Если ключ задачи еще неизвестен, создаем запись
+                    if event.issue_key not in self._processed_events:
+                        self._processed_events[event.issue_key] = set()
+
+                    # Проверяем, было ли событие уже обработано
+                    if event.id not in self._processed_events[event.issue_key]:
+                        new_events.append(event)
+
+                if new_events:
+                    await self._send_events(self._chat_id, new_events)
+
+                    # Обновляем состояние после отправки
+                    for event in new_events:
+                        self._processed_events[event.issue_key].add(event.id)
+
+                    # Очищаем состояние для закрытых задач
+                    for event in new_events:
+                        if event.event_type == "status_change":
+                            # Если статус меняется на закрытый, удаляем историю для этой задачи
+                            if any(s in event.details for s in ("Done", "Closed", "Resolved")):
+                                if event.issue_key in self._processed_events:
+                                    del self._processed_events[event.issue_key]
+
+                    # Сохраняем состояние (обновленный список ID)
+                    self._save_state()
 
             # Обновляем время последней проверки
             self._last_check = datetime.now()
@@ -137,8 +211,14 @@ class NotificationService:
 
         for event in events:
             message = self._format_event(event)
+            disable_notification = event.author_id in self._silent_users
+
             try:
-                await self._bot.send_message(chat_id, message)
+                await self._bot.send_message(
+                    chat_id,
+                    message,
+                    disable_notification=disable_notification
+                )
                 # Небольшая задержка между сообщениями
                 await asyncio.sleep(0.5)
             except Exception as e:

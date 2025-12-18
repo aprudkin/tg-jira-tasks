@@ -37,7 +37,9 @@ class JiraEvent:
     issue_url: str
     event_type: str  # "comment", "status_change", "assigned"
     author: str
+    author_id: str
     details: str
+    id: str  # Unique ID for deduplication
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -215,27 +217,26 @@ class JiraService:
         for issue in issues:
             issue_url = f"{settings.jira_url}/browse/{issue.key}"
 
-            # Проверяем комментарии
-            if hasattr(issue.fields, "comment") and issue.fields.comment:
+            # Проверяем комментарии (только для открытых задач)
+            is_closed = issue.fields.status.name in ("Done", "Closed", "Resolved")
+            if hasattr(issue.fields, "comment") and issue.fields.comment and not is_closed:
                 for comment in issue.fields.comment.comments:
                     comment_created = self._parse_jira_datetime(comment.created)
                     if comment_created > since:
                         author_name = getattr(comment.author, "name", "") or getattr(comment.author, "accountId", "")
                         author_display = getattr(comment.author, "displayName", author_name)
 
-                        # Пропускаем свои комментарии
-                        if author_name == current_user:
-                            continue
-
                         # Обрезаем длинные комментарии
                         body = comment.body[:200] + "..." if len(comment.body) > 200 else comment.body
 
                         events.append(JiraEvent(
+                            id=f"comment_{comment.id}",
                             issue_key=issue.key,
                             issue_summary=issue.fields.summary,
                             issue_url=issue_url,
                             event_type="comment",
                             author=author_display,
+                            author_id=author_name,
                             details=body,
                             timestamp=comment_created,
                         ))
@@ -250,28 +251,28 @@ class JiraService:
                     author_name = getattr(history.author, "name", "") or getattr(history.author, "accountId", "")
                     author_display = getattr(history.author, "displayName", author_name)
 
-                    # Пропускаем свои действия
-                    if author_name == current_user:
-                        continue
-
                     for item in history.items:
                         if item.field == "status":
                             events.append(JiraEvent(
+                                id=f"status_{history.id}_{item.field}",
                                 issue_key=issue.key,
                                 issue_summary=issue.fields.summary,
                                 issue_url=issue_url,
                                 event_type="status_change",
                                 author=author_display,
+                                author_id=author_name,
                                 details=f"{item.fromString} → {item.toString}",
                                 timestamp=history_created,
                             ))
                         elif item.field == "assignee" and item.toString == current_user:
                             events.append(JiraEvent(
+                                id=f"assign_{history.id}_{item.field}",
                                 issue_key=issue.key,
                                 issue_summary=issue.fields.summary,
                                 issue_url=issue_url,
                                 event_type="assigned",
                                 author=author_display,
+                                author_id=author_name,
                                 details=f"Назначено на вас",
                                 timestamp=history_created,
                             ))

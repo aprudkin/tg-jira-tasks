@@ -23,7 +23,9 @@ async def cmd_start(message: Message) -> None:
         "/byme - Tasks created by me (assigned to others)\n"
         "/stats - Task statistics\n"
         "/sync [X] - Enable notifications (every X min, default 30)\n"
-        "/unsync - Disable notifications"
+        "/unsync - Disable notifications\n"
+        "/silent [user] - Mute notifications from user (default: self)\n"
+        "/unsilent [user] - Unmute notifications from user (default: self)"
     )
 
 
@@ -266,3 +268,53 @@ async def cmd_unsync(message: Message) -> None:
         await message.answer("🔕 Notifications disabled.")
     else:
         await message.answer("Failed to disable notifications.")
+
+
+@router.message(Command("silent"))
+async def cmd_silent(message: Message, command: CommandObject) -> None:
+    """Обработчик команды /silent - включает/выключает тихий режим для пользователя."""
+    target_user = command.args.strip() if command.args else None
+
+    # Если аргумент не передан, используем имя текущего пользователя
+    if not target_user:
+        try:
+            target_user = jira_service.get_current_user()
+            if not target_user:
+                await message.answer("Could not determine your Jira username. Please specify it explicitly: /silent username")
+                return
+        except Exception as e:
+            await message.answer(f"Error fetching current user: {e}")
+            return
+
+    is_silent = notification_service.is_user_silent(target_user)
+
+    if is_silent:
+        await message.answer(f"Messages from '{target_user}' are already silent (Sound OFF).")
+        return
+
+    notification_service.mute_user(target_user)
+    await message.answer(f"🔕 Sound OFF for messages from '{target_user}'.")
+
+
+@router.message(Command("unsilent"))
+async def cmd_unsilent(message: Message, command: CommandObject) -> None:
+    """Обработчик команды /unsilent - включает звук для пользователя."""
+    target_user = command.args.strip() if command.args else None
+
+    # Если аргумент не передан, используем имя текущего пользователя
+    if not target_user:
+        try:
+            target_user = jira_service.get_current_user()
+            if not target_user:
+                await message.answer("Could not determine your Jira username. Please specify it explicitly: /unsilent username")
+                return
+        except Exception as e:
+            await message.answer(f"Error fetching current user: {e}")
+            return
+
+    if not notification_service.is_user_silent(target_user):
+        await message.answer(f"Messages from '{target_user}' are already audible (Sound ON).")
+        return
+
+    notification_service.unmute_user(target_user)
+    await message.answer(f"🔔 Sound ON for messages from '{target_user}'.")
