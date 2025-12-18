@@ -147,7 +147,7 @@ async def cmd_todo(message: Message) -> None:
 
 @router.message(Command("recent"))
 async def cmd_recent(message: Message) -> None:
-    """Обработчик команды /recent - показывает недавно обновлённые задачи."""
+    """Обработчик команды /recent - показывает недавно обновлённые задачи, сгруппированные по статусу."""
     await message.answer("Loading tasks...")
 
     try:
@@ -160,8 +160,22 @@ async def cmd_recent(message: Message) -> None:
         await message.answer("No tasks updated in the last 24 hours.")
         return
 
+    # Группировка по статусу
+    tasks_by_status: dict[str, list[JiraTask]] = defaultdict(list)
+    for task in tasks:
+        tasks_by_status[task.status].append(task)
+
     lines = [hbold("Tasks updated in last 24h:"), ""]
-    lines.extend(format_task(task, show_status=True) for task in tasks)
+
+    # Порядок статусов по важности
+    status_order = ["In Progress", "Reopened", "Discussion", "On Hold", "Resolved", "Closed"]
+    # Собираем все статусы: сначала из порядка, потом остальные
+    all_statuses = [s for s in status_order if s in tasks_by_status]
+    all_statuses.extend(s for s in tasks_by_status if s not in status_order)
+
+    for status in all_statuses:
+        lines.append(f"\n{hbold(status)}:")
+        lines.extend(format_task(task) for task in tasks_by_status[status])
 
     await message.answer("\n".join(lines))
 
