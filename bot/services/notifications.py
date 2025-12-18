@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.utils.markdown import hbold, hlink
@@ -8,6 +10,9 @@ from aiogram.utils.markdown import hbold, hlink
 from bot.services.jira import jira_service, JiraEvent
 
 logger = logging.getLogger(__name__)
+
+# Путь к файлу состояния (в Docker монтируется через volume)
+STATE_FILE = Path("/app/data/sync_state.json")
 
 
 class NotificationService:
@@ -22,6 +27,35 @@ class NotificationService:
         self._interval_minutes: int = self.DEFAULT_INTERVAL_MINUTES
         self._task: asyncio.Task | None = None
         self._bot: Bot | None = None
+        # Загружаем сохранённое состояние при инициализации
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Загружает состояние подписки из файла."""
+        try:
+            if STATE_FILE.exists():
+                data = json.loads(STATE_FILE.read_text())
+                self._chat_id = data.get("chat_id")
+                self._interval_minutes = data.get("interval_minutes", self.DEFAULT_INTERVAL_MINUTES)
+                # last_check ставим на текущее время, чтобы не слать старые уведомления
+                if self._chat_id is not None:
+                    self._last_check = datetime.now()
+                    logger.info(f"Restored subscription (chat_id={self._chat_id}, interval={self._interval_minutes} min)")
+        except Exception as e:
+            logger.error(f"Error loading state: {e}")
+
+    def _save_state(self) -> None:
+        """Сохраняет состояние подписки в файл."""
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "chat_id": self._chat_id,
+                "interval_minutes": self._interval_minutes,
+            }
+            STATE_FILE.write_text(json.dumps(data))
+            logger.info("Subscription state saved")
+        except Exception as e:
+            logger.error(f"Error saving state: {e}")
 
     def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
         """Подписывает на уведомления с указанным интервалом."""
@@ -30,6 +64,7 @@ class NotificationService:
         self._chat_id = chat_id
         self._last_check = datetime.now()
         self._interval_minutes = interval_minutes or self.DEFAULT_INTERVAL_MINUTES
+        self._save_state()
         logger.info(f"Subscribed to notifications (interval: {self._interval_minutes} min)")
         return True
 
@@ -39,6 +74,7 @@ class NotificationService:
             return False
         self._chat_id = None
         self._last_check = None
+        self._save_state()
         logger.info("Unsubscribed from notifications")
         return True
 
