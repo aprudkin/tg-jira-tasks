@@ -115,6 +115,19 @@ class NotificationService:
         """Возвращает текущий интервал проверки в минутах."""
         return self._interval_minutes
 
+    def update_interval(self, chat_id: int, interval_minutes: int) -> bool:
+        """Обновляет интервал проверки для подписанного пользователя."""
+        if self._chat_id != chat_id:
+            return False
+        self._interval_minutes = interval_minutes
+        self._save_state()
+        logger.info(f"Updated notification interval to {interval_minutes} min")
+        return True
+
+    async def check_now(self) -> None:
+        """Запускает немедленную проверку уведомлений."""
+        await self._check_notifications()
+
     def mute_user(self, username: str) -> None:
         """Добавляет пользователя в список тихих."""
         self._silent_users.add(username)

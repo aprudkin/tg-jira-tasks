@@ -226,16 +226,8 @@ async def cmd_stats(message: Message) -> None:
 
 @router.message(Command("sync"))
 async def cmd_sync(message: Message, command: CommandObject) -> None:
-    """Обработчик команды /sync - включает уведомления о событиях Jira."""
+    """Обработчик команды /sync - включает или обновляет уведомления о событиях Jira."""
     chat_id = message.chat.id
-
-    if notification_service.is_subscribed(chat_id):
-        current_interval = notification_service.get_interval()
-        await message.answer(
-            f"Notifications are already enabled (every {current_interval} min).\n"
-            "Use /unsync to disable first."
-        )
-        return
 
     # Парсим интервал из аргумента команды
     interval_minutes: int | None = None
@@ -252,6 +244,22 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
             )
             return
 
+    # Если уже подписан - обновляем интервал и запускаем проверку
+    if notification_service.is_subscribed(chat_id):
+        current_interval = notification_service.get_interval()
+        new_interval = interval_minutes or current_interval
+
+        if new_interval != current_interval:
+            notification_service.update_interval(chat_id, new_interval)
+            await message.answer(f"🔄 Interval updated: {current_interval} → {new_interval} min\nChecking for updates...")
+        else:
+            await message.answer("Checking for updates...")
+
+        # Запускаем немедленную проверку
+        await notification_service.check_now()
+        return
+
+    # Новая подписка
     if notification_service.subscribe(chat_id, interval_minutes):
         actual_interval = interval_minutes or DEFAULT_NOTIFICATION_INTERVAL
         await message.answer(
