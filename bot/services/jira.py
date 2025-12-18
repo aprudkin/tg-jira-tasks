@@ -196,6 +196,8 @@ class JiraService:
         - Новые комментарии (не от текущего пользователя)
         - Изменения статуса (не текущим пользователем)
         - Новые назначения на меня
+
+        Для задач где пользователь: assignee, reporter или watcher.
         """
         events: list[JiraEvent] = []
         current_user = self.get_current_user()
@@ -204,9 +206,9 @@ class JiraService:
         since_str = since.strftime("%Y-%m-%d %H:%M")
 
         # Поиск задач, обновлённых с указанного времени
-        # Ищем задачи где я assignee или reporter
+        # Ищем задачи где я assignee, reporter или watcher
         jql = (
-            f'(assignee = currentUser() OR reporter = currentUser()) '
+            f'(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) '
             f'AND updated >= "{since_str}" ORDER BY updated DESC'
         )
 
