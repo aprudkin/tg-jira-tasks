@@ -189,6 +189,27 @@ except asyncio.CancelledError:
     break
 ```
 
+### State Persistence
+
+Subscription state is saved to JSON file for survival across restarts:
+
+```python
+STATE_FILE = Path("/app/data/sync_state.json")
+
+def _save_state(self) -> None:
+    data = {"chat_id": self._chat_id, "interval_minutes": self._interval_minutes}
+    STATE_FILE.write_text(json.dumps(data))
+
+def _load_state(self) -> None:
+    if STATE_FILE.exists():
+        data = json.loads(STATE_FILE.read_text())
+        self._chat_id = data.get("chat_id")
+        self._interval_minutes = data.get("interval_minutes")
+        self._last_check = datetime.now()  # Avoid sending old notifications
+```
+
+Docker volume `bot_data` is mounted to `/app/data` for persistence.
+
 ## Security
 
 ### Authentication Middleware
