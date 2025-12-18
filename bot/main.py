@@ -38,7 +38,7 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         # Остановка сервиса уведомлений
-        notification_service.stop()
+        await notification_service.stop()
         # Корректное завершение сессии бота
         await bot.session.close()
 

@@ -140,18 +140,29 @@ class NotificationService:
             self._task = asyncio.create_task(self._check_loop())
             logger.info("Notification service started")
 
-    def stop(self) -> None:
-        """Останавливает фоновую задачу."""
+    async def stop(self) -> None:
+        """Останавливает фоновую задачу и ожидает её завершения."""
         if self._task and not self._task.done():
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
             logger.info("Notification service stopped")
 
     async def _check_loop(self) -> None:
         """Цикл проверки уведомлений."""
+        # Первая проверка выполняется сразу после подписки
+        first_check = True
         while True:
             try:
-                # Ждём интервал в секундах
-                await asyncio.sleep(self._interval_minutes * 60)
+                if first_check:
+                    # Небольшая задержка для завершения инициализации
+                    await asyncio.sleep(5)
+                    first_check = False
+                else:
+                    # Ждём интервал в секундах
+                    await asyncio.sleep(self._interval_minutes * 60)
                 await self._check_notifications()
             except asyncio.CancelledError:
                 break

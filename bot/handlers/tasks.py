@@ -1,12 +1,30 @@
+from collections import defaultdict
+
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.utils.markdown import hbold, hlink
 
-from bot.services.jira import jira_service
-from bot.services.notifications import notification_service, NotificationService
+from bot.services.jira import jira_service, JiraTask
+from bot.services.notifications import notification_service
 
 router = Router()
+
+# Интервал по умолчанию для уведомлений (в минутах)
+DEFAULT_NOTIFICATION_INTERVAL = 30
+
+
+def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool = False) -> str:
+    """Форматирует задачу для отображения в Telegram."""
+    line = f"- {hlink(task.key, task.url)}: {task.summary}"
+    if show_assignee or show_status:
+        details = []
+        if show_assignee:
+            details.append(task.assignee or "Unassigned")
+        if show_status:
+            details.append(task.status)
+        line += f"\n  └ {' | '.join(details)}"
+    return line
 
 
 @router.message(Command("start"))
@@ -45,10 +63,8 @@ async def cmd_inwork(message: Message) -> None:
         return
 
     lines = [hbold("My tasks in progress:"), ""]
-    for task in tasks:
-        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+    lines.extend(format_task(task) for task in tasks)
 
-    # parse_mode берётся из DefaultBotProperties в main.py
     await message.answer("\n".join(lines))
 
 
@@ -67,32 +83,22 @@ async def cmd_sprint(message: Message) -> None:
         await message.answer("No tasks found in active sprint.")
         return
 
-    # Группировка по статусу
-    tasks_by_status = {}
+    # Группировка по статусу с defaultdict
+    tasks_by_status: dict[str, list[JiraTask]] = defaultdict(list)
     for task in tasks:
-        if task.status not in tasks_by_status:
-            tasks_by_status[task.status] = []
         tasks_by_status[task.status].append(task)
 
     lines = [hbold("My sprint tasks:"), ""]
 
     # Порядок сортировки статусов
     status_order = ["In Progress", "Discussion", "Hold", "Backlog", "Resolved"]
+    # Собираем все статусы: сначала из порядка, потом остальные
+    all_statuses = [s for s in status_order if s in tasks_by_status]
+    all_statuses.extend(s for s in tasks_by_status if s not in status_order)
 
-    # Сначала выводим статусы из предопределенного порядка
-    for status in status_order:
-        if status in tasks_by_status:
-            lines.append(f"\n{hbold(status)}:")
-            for task in tasks_by_status[status]:
-                lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
-            # Удаляем обработанный статус, чтобы не вывести его повторно
-            del tasks_by_status[status]
-
-    # Затем выводим оставшиеся статусы (если есть)
-    for status, status_tasks in tasks_by_status.items():
+    for status in all_statuses:
         lines.append(f"\n{hbold(status)}:")
-        for task in status_tasks:
-            lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+        lines.extend(format_task(task) for task in tasks_by_status[status])
 
     await message.answer("\n".join(lines))
 
@@ -113,10 +119,7 @@ async def cmd_byme(message: Message) -> None:
         return
 
     lines = [hbold("Tasks created by me (assigned to others):"), ""]
-    for task in tasks:
-        assignee = task.assignee or "Unassigned"
-        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
-        lines.append(f"  └ {assignee} ({task.status})")
+    lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
 
     await message.answer("\n".join(lines))
 
@@ -137,8 +140,7 @@ async def cmd_todo(message: Message) -> None:
         return
 
     lines = [hbold("My backlog tasks:"), ""]
-    for task in tasks:
-        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
+    lines.extend(format_task(task) for task in tasks)
 
     await message.answer("\n".join(lines))
 
@@ -159,9 +161,7 @@ async def cmd_recent(message: Message) -> None:
         return
 
     lines = [hbold("Tasks updated in last 24h:"), ""]
-    for task in tasks:
-        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
-        lines.append(f"  └ {task.status}")
+    lines.extend(format_task(task, show_status=True) for task in tasks)
 
     await message.answer("\n".join(lines))
 
@@ -182,10 +182,7 @@ async def cmd_watching(message: Message) -> None:
         return
 
     lines = [hbold("Tasks I'm watching:"), ""]
-    for task in tasks:
-        assignee = task.assignee or "Unassigned"
-        lines.append(f"- {hlink(task.key, task.url)}: {task.summary}")
-        lines.append(f"  └ {assignee} ({task.status})")
+    lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
 
     await message.answer("\n".join(lines))
 
@@ -237,12 +234,12 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
         except ValueError:
             await message.answer(
                 "Invalid interval. Usage: /sync [minutes]\n"
-                f"Example: /sync 15 (default: {NotificationService.DEFAULT_INTERVAL_MINUTES})"
+                f"Example: /sync 15 (default: {DEFAULT_NOTIFICATION_INTERVAL})"
             )
             return
 
     if notification_service.subscribe(chat_id, interval_minutes):
-        actual_interval = interval_minutes or NotificationService.DEFAULT_INTERVAL_MINUTES
+        actual_interval = interval_minutes or DEFAULT_NOTIFICATION_INTERVAL
         await message.answer(
             f"✅ Notifications enabled!\n\n"
             f"You will receive updates every {actual_interval} minutes:\n"

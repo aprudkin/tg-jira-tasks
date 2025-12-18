@@ -1,9 +1,12 @@
+import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from jira import JIRA
 
 from bot.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -222,30 +225,34 @@ class JiraService:
             if hasattr(issue.fields, "comment") and issue.fields.comment and not is_closed:
                 for comment in issue.fields.comment.comments:
                     comment_created = self._parse_jira_datetime(comment.created)
-                    if comment_created > since:
-                        author_name = getattr(comment.author, "name", "") or getattr(comment.author, "accountId", "")
-                        author_display = getattr(comment.author, "displayName", author_name)
+                    # Пропускаем события с некорректной датой или старые
+                    if comment_created is None or comment_created <= since:
+                        continue
 
-                        # Обрезаем длинные комментарии
-                        body = comment.body[:200] + "..." if len(comment.body) > 200 else comment.body
+                    author_name = getattr(comment.author, "name", "") or getattr(comment.author, "accountId", "")
+                    author_display = getattr(comment.author, "displayName", author_name)
 
-                        events.append(JiraEvent(
-                            id=f"comment_{comment.id}",
-                            issue_key=issue.key,
-                            issue_summary=issue.fields.summary,
-                            issue_url=issue_url,
-                            event_type="comment",
-                            author=author_display,
-                            author_id=author_name,
-                            details=body,
-                            timestamp=comment_created,
-                        ))
+                    # Обрезаем длинные комментарии
+                    body = comment.body[:200] + "..." if len(comment.body) > 200 else comment.body
+
+                    events.append(JiraEvent(
+                        id=f"comment_{comment.id}",
+                        issue_key=issue.key,
+                        issue_summary=issue.fields.summary,
+                        issue_url=issue_url,
+                        event_type="comment",
+                        author=author_display,
+                        author_id=author_name,
+                        details=body,
+                        timestamp=comment_created,
+                    ))
 
             # Проверяем changelog на изменения статуса и назначения
             if hasattr(issue, "changelog") and issue.changelog:
                 for history in issue.changelog.histories:
                     history_created = self._parse_jira_datetime(history.created)
-                    if history_created <= since:
+                    # Пропускаем события с некорректной датой или старые
+                    if history_created is None or history_created <= since:
                         continue
 
                     author_name = getattr(history.author, "name", "") or getattr(history.author, "accountId", "")
@@ -264,7 +271,8 @@ class JiraService:
                                 details=f"{item.fromString} → {item.toString}",
                                 timestamp=history_created,
                             ))
-                        elif item.field == "assignee" and item.toString == current_user:
+                        elif item.field == "assignee" and item.to == current_user:
+                            # item.to содержит username/accountId, item.toString - displayName
                             events.append(JiraEvent(
                                 id=f"assign_{history.id}_{item.field}",
                                 issue_key=issue.key,
@@ -281,15 +289,27 @@ class JiraService:
         events.sort(key=lambda e: e.timestamp)
         return events
 
-    def _parse_jira_datetime(self, dt_str: str) -> datetime:
-        """Парсит строку даты из Jira API."""
-        # Jira возвращает даты в формате: 2024-01-15T10:30:00.000+0000
+    def _parse_jira_datetime(self, dt_str: str) -> datetime | None:
+        """Парсит строку даты из Jira API.
+
+        Jira возвращает даты в формате: 2024-01-15T10:30:00.000+0000
+        Возвращает datetime в UTC или None при ошибке парсинга.
+        """
         try:
-            # Убираем миллисекунды и таймзону для простоты
-            dt_str = dt_str.split(".")[0]
-            return datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
-        except (ValueError, AttributeError):
-            return datetime.now()
+            # Убираем миллисекунды, оставляем таймзону
+            if "." in dt_str:
+                base, rest = dt_str.split(".")
+                # rest = "000+0000" или "000-0500"
+                tz_part = rest[3:] if len(rest) > 3 else "+0000"
+                dt_str = base + tz_part
+
+            # Парсим с таймзоной (формат: 2024-01-15T10:30:00+0000)
+            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
+            # Конвертируем в UTC для единообразия
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except (ValueError, AttributeError) as e:
+            logger.warning(f"Ошибка парсинга даты '{dt_str}': {e}")
+            return None
 
 
 jira_service = JiraService()
