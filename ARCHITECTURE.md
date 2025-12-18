@@ -177,17 +177,32 @@ def start(self, bot: Bot) -> None:
     self._task = asyncio.create_task(self._check_loop())
 
 async def _check_loop(self) -> None:
+    first_check = True
     while True:
-        await asyncio.sleep(self._interval_minutes * 60)
+        if first_check:
+            await asyncio.sleep(5)  # Immediate check after subscription
+            first_check = False
+        else:
+            await asyncio.sleep(self._interval_minutes * 60)
         await self._check_notifications()
 ```
 
-Graceful shutdown via `CancelledError`:
+Graceful async shutdown:
 
 ```python
-except asyncio.CancelledError:
-    break
+async def stop(self) -> None:
+    if self._task and not self._task.done():
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
 ```
+
+**Events monitored** (via JQL `assignee OR reporter OR watcher`):
+- New comments (on open tasks only)
+- Status changes
+- Assignments to current user
 
 ### State Persistence
 
