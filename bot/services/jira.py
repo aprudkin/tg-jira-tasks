@@ -193,8 +193,9 @@ class JiraService:
         """Получает события по задачам пользователя с указанного времени.
 
         Отслеживает:
-        - Новые комментарии (не от текущего пользователя)
-        - Изменения статуса (не текущим пользователем)
+        - Создание новых задач (назначенных на меня)
+        - Новые комментарии
+        - Изменения статуса
         - Новые назначения на меня
 
         Для задач где пользователь: assignee, reporter или watcher.
@@ -214,13 +215,36 @@ class JiraService:
 
         issues = self.client.search_issues(
             jql,
-            fields=["key", "summary", "status", "comment", "assignee"],
+            fields=["key", "summary", "status", "comment", "assignee", "created", "reporter"],
             maxResults=self.MAX_RESULTS,
             expand="changelog",
         )
 
         for issue in issues:
             issue_url = f"{settings.jira_url}/browse/{issue.key}"
+
+            # Проверяем, была ли задача создана после since (новая задача)
+            created_dt = self._parse_jira_datetime(issue.fields.created)
+            if created_dt is not None and created_dt > since:
+                # Получаем автора (reporter)
+                reporter_name = getattr(issue.fields.reporter, "name", "") or getattr(issue.fields.reporter, "accountId", "")
+                reporter_display = getattr(issue.fields.reporter, "displayName", reporter_name)
+
+                # Получаем assignee
+                assignee_display = getattr(issue.fields.assignee, "displayName", None) if issue.fields.assignee else None
+                details = f"Назначено: {assignee_display}" if assignee_display else "Без исполнителя"
+
+                events.append(JiraEvent(
+                    id=f"created_{issue.key}",
+                    issue_key=issue.key,
+                    issue_summary=issue.fields.summary,
+                    issue_url=issue_url,
+                    event_type="created",
+                    author=reporter_display,
+                    author_id=reporter_name,
+                    details=details,
+                    timestamp=created_dt,
+                ))
 
             # Проверяем комментарии (только для открытых задач)
             is_closed = issue.fields.status.name in ("Done", "Closed", "Resolved")

@@ -251,6 +251,7 @@ class NotificationService:
     def _format_event(self, event: JiraEvent) -> str:
         """Форматирует событие для отправки."""
         event_icons = {
+            "created": "🆕",
             "comment": "💬",
             "status_change": "🔄",
             "assigned": "👤",
@@ -258,6 +259,7 @@ class NotificationService:
         icon = event_icons.get(event.event_type, "📌")
 
         event_titles = {
+            "created": "Новая задача",
             "comment": "Новый комментарий",
             "status_change": "Изменение статуса",
             "assigned": "Назначение",
