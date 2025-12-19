@@ -68,8 +68,11 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Error loading state: {e}")
 
-    def _save_state(self) -> None:
+    async def _save_state(self) -> None:
         """Сохраняет состояние подписки в файл."""
+        await asyncio.to_thread(self._save_state_sync)
+
+    def _save_state_sync(self) -> None:
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             data = {
@@ -86,24 +89,24 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Error saving state: {e}")
 
-    def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
+    async def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
         """Подписывает на уведомления с указанным интервалом."""
         if self._chat_id is not None:
             return False
         self._chat_id = chat_id
         self._last_check = datetime.now()
         self._interval_minutes = interval_minutes or self.DEFAULT_INTERVAL_MINUTES
-        self._save_state()
+        await self._save_state()
         logger.info(f"Subscribed to notifications (interval: {self._interval_minutes} min)")
         return True
 
-    def unsubscribe(self, chat_id: int) -> bool:
+    async def unsubscribe(self, chat_id: int) -> bool:
         """Отписывает от уведомлений."""
         if self._chat_id != chat_id:
             return False
         self._chat_id = None
         self._last_check = None
-        self._save_state()
+        await self._save_state()
         logger.info("Unsubscribed from notifications")
         return True
 
@@ -115,12 +118,12 @@ class NotificationService:
         """Возвращает текущий интервал проверки в минутах."""
         return self._interval_minutes
 
-    def update_interval(self, chat_id: int, interval_minutes: int) -> bool:
+    async def update_interval(self, chat_id: int, interval_minutes: int) -> bool:
         """Обновляет интервал проверки для подписанного пользователя."""
         if self._chat_id != chat_id:
             return False
         self._interval_minutes = interval_minutes
-        self._save_state()
+        await self._save_state()
         logger.info(f"Updated notification interval to {interval_minutes} min")
         return True
 
@@ -128,15 +131,15 @@ class NotificationService:
         """Запускает немедленную проверку уведомлений."""
         await self._check_notifications()
 
-    def mute_user(self, username: str) -> None:
+    async def mute_user(self, username: str) -> None:
         """Добавляет пользователя в список тихих."""
         self._silent_users.add(username)
-        self._save_state()
+        await self._save_state()
 
-    def unmute_user(self, username: str) -> None:
+    async def unmute_user(self, username: str) -> None:
         """Убирает пользователя из списка тихих."""
         self._silent_users.discard(username)
-        self._save_state()
+        await self._save_state()
 
     def is_user_silent(self, username: str) -> bool:
         """Проверяет, находится ли пользователь в списке тихих."""
@@ -188,9 +191,7 @@ class NotificationService:
             return
 
         try:
-            events = await asyncio.to_thread(
-                jira_service.get_events_since, self._last_check
-            )
+            events = await jira_service.get_events_since(self._last_check)
 
             if events:
                 # Фильтруем события, которые уже были отправлены
@@ -220,7 +221,7 @@ class NotificationService:
                                     del self._processed_events[event.issue_key]
 
                     # Сохраняем состояние (обновленный список ID)
-                    self._save_state()
+                    await self._save_state()
 
             # Обновляем время последней проверки
             self._last_check = datetime.now()

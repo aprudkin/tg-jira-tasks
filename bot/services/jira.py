@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -84,42 +85,60 @@ class JiraService:
                 )
         return self._client
 
-    def get_my_tasks_in_progress(self) -> list[JiraTask]:
+    async def get_my_tasks_in_progress(self) -> list[JiraTask]:
         """Получает задачи текущего пользователя в статусе 'In Progress'."""
+        return await asyncio.to_thread(self._get_my_tasks_in_progress_sync)
+
+    def _get_my_tasks_in_progress_sync(self) -> list[JiraTask]:
         jql = 'assignee = currentUser() AND status = "In Progress"'
         return self._search_issues(jql)
 
-    def get_my_tasks_in_sprint(self) -> list[JiraTask]:
+    async def get_my_tasks_in_sprint(self) -> list[JiraTask]:
         """Получает задачи текущего пользователя в активных спринтах."""
+        return await asyncio.to_thread(self._get_my_tasks_in_sprint_sync)
+
+    def _get_my_tasks_in_sprint_sync(self) -> list[JiraTask]:
         jql = 'assignee = currentUser() AND sprint in openSprints() ORDER BY status ASC'
         return self._search_issues(jql)
 
-    def get_tasks_created_by_me(self) -> list[JiraTask]:
+    async def get_tasks_created_by_me(self) -> list[JiraTask]:
         """Получает незавершённые задачи, созданные мной, где исполнитель не я."""
+        return await asyncio.to_thread(self._get_tasks_created_by_me_sync)
+
+    def _get_tasks_created_by_me_sync(self) -> list[JiraTask]:
         jql = (
             'reporter = currentUser() AND assignee != currentUser() '
             'AND resolution = Unresolved ORDER BY updated DESC'
         )
         return self._search_issues(jql, include_assignee=True)
 
-    def get_recent_tasks(self, hours: int = 24) -> list[JiraTask]:
+    async def get_recent_tasks(self, hours: int = 24) -> list[JiraTask]:
         """Получает задачи, обновлённые за последние N часов."""
+        return await asyncio.to_thread(self._get_recent_tasks_sync, hours)
+
+    def _get_recent_tasks_sync(self, hours: int) -> list[JiraTask]:
         jql = (
             f'assignee = currentUser() AND updated >= -{hours}h '
             'ORDER BY updated DESC'
         )
         return self._search_issues(jql)
 
-    def get_todo_tasks(self) -> list[JiraTask]:
+    async def get_todo_tasks(self) -> list[JiraTask]:
         """Получает задачи в статусах To Do / Backlog."""
+        return await asyncio.to_thread(self._get_todo_tasks_sync)
+
+    def _get_todo_tasks_sync(self) -> list[JiraTask]:
         jql = (
             'assignee = currentUser() AND status in ("To Do", "Backlog", "Open") '
             'AND resolution = Unresolved ORDER BY priority DESC, created ASC'
         )
         return self._search_issues(jql)
 
-    def get_watching_tasks(self) -> list[JiraTask]:
+    async def get_watching_tasks(self) -> list[JiraTask]:
         """Получает незакрытые задачи, которые я отслеживаю (watcher), где исполнитель не я."""
+        return await asyncio.to_thread(self._get_watching_tasks_sync)
+
+    def _get_watching_tasks_sync(self) -> list[JiraTask]:
         jql = (
             'watcher = currentUser() AND assignee != currentUser() '
             'AND resolution = Unresolved '
@@ -128,8 +147,11 @@ class JiraService:
         )
         return self._search_issues(jql, include_assignee=True)
 
-    def get_stats(self) -> JiraStats:
+    async def get_stats(self) -> JiraStats:
         """Получает статистику по задачам."""
+        return await asyncio.to_thread(self._get_stats_sync)
+
+    def _get_stats_sync(self) -> JiraStats:
         # Задачи в работе
         in_progress = self.client.search_issues(
             'assignee = currentUser() AND status = "In Progress"',
@@ -185,11 +207,15 @@ class JiraService:
             for issue in issues
         ]
 
-    def get_current_user(self) -> str:
+    async def get_current_user(self) -> str:
         """Возвращает имя текущего пользователя Jira."""
-        return self.client.current_user()
+        return await asyncio.to_thread(self.client.current_user)
 
-    def get_events_since(self, since: datetime) -> list[JiraEvent]:
+    async def get_events_since(self, since: datetime) -> list[JiraEvent]:
+        """Получает события по задачам пользователя с указанного времени (асинхронно)."""
+        return await asyncio.to_thread(self._get_events_since_sync, since)
+
+    def _get_events_since_sync(self, since: datetime) -> list[JiraEvent]:
         """Получает события по задачам пользователя с указанного времени.
 
         Отслеживает:
@@ -201,7 +227,7 @@ class JiraService:
         Для задач где пользователь: assignee, reporter или watcher.
         """
         events: list[JiraEvent] = []
-        current_user = self.get_current_user()
+        current_user = self.client.current_user()
 
         # Формат даты для JQL
         since_str = since.strftime("%Y-%m-%d %H:%M")

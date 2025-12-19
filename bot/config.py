@@ -1,3 +1,4 @@
+import functools
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +17,7 @@ class Settings(BaseSettings):
     jira_pat: str | None = None
     allowed_users: str = ""
 
-    @property
+    @functools.cached_property
     def allowed_user_ids(self) -> list[int]:
         """Преобразует строку allowed_users в список ID пользователей."""
         if not self.allowed_users:

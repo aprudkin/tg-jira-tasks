@@ -53,7 +53,7 @@ async def cmd_inwork(message: Message) -> None:
     await message.answer("Loading tasks...")
 
     try:
-        tasks = jira_service.get_my_tasks_in_progress()
+        tasks = await jira_service.get_my_tasks_in_progress()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -74,7 +74,7 @@ async def cmd_sprint(message: Message) -> None:
     await message.answer("Loading sprint tasks...")
 
     try:
-        tasks = jira_service.get_my_tasks_in_sprint()
+        tasks = await jira_service.get_my_tasks_in_sprint()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -109,7 +109,7 @@ async def cmd_byme(message: Message) -> None:
     await message.answer("Loading tasks...")
 
     try:
-        tasks = jira_service.get_tasks_created_by_me()
+        tasks = await jira_service.get_tasks_created_by_me()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -130,7 +130,7 @@ async def cmd_todo(message: Message) -> None:
     await message.answer("Loading tasks...")
 
     try:
-        tasks = jira_service.get_todo_tasks()
+        tasks = await jira_service.get_todo_tasks()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -151,7 +151,7 @@ async def cmd_recent(message: Message) -> None:
     await message.answer("Loading tasks...")
 
     try:
-        tasks = jira_service.get_recent_tasks(hours=24)
+        tasks = await jira_service.get_recent_tasks(hours=24)
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -186,7 +186,7 @@ async def cmd_watching(message: Message) -> None:
     await message.answer("Loading tasks...")
 
     try:
-        tasks = jira_service.get_watching_tasks()
+        tasks = await jira_service.get_watching_tasks()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -207,7 +207,7 @@ async def cmd_stats(message: Message) -> None:
     await message.answer("Loading stats...")
 
     try:
-        stats = jira_service.get_stats()
+        stats = await jira_service.get_stats()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
@@ -250,7 +250,7 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
         new_interval = interval_minutes or current_interval
 
         if new_interval != current_interval:
-            notification_service.update_interval(chat_id, new_interval)
+            await notification_service.update_interval(chat_id, new_interval)
             await message.answer(f"🔄 Interval updated: {current_interval} → {new_interval} min\nChecking for updates...")
         else:
             await message.answer("Checking for updates...")
@@ -260,7 +260,7 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
         return
 
     # Новая подписка
-    if notification_service.subscribe(chat_id, interval_minutes):
+    if await notification_service.subscribe(chat_id, interval_minutes):
         actual_interval = interval_minutes or DEFAULT_NOTIFICATION_INTERVAL
         await message.answer(
             f"✅ Notifications enabled!\n\n"
@@ -283,7 +283,7 @@ async def cmd_unsync(message: Message) -> None:
         await message.answer("Notifications are not enabled.")
         return
 
-    if notification_service.unsubscribe(chat_id):
+    if await notification_service.unsubscribe(chat_id):
         await message.answer("🔕 Notifications disabled.")
     else:
         await message.answer("Failed to disable notifications.")
@@ -297,7 +297,7 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
     # Если аргумент не передан, используем имя текущего пользователя
     if not target_user:
         try:
-            target_user = jira_service.get_current_user()
+            target_user = await jira_service.get_current_user()
             if not target_user:
                 await message.answer("Could not determine your Jira username. Please specify it explicitly: /silent username")
                 return
@@ -311,7 +311,7 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
         await message.answer(f"Messages from '{target_user}' are already silent (Sound OFF).")
         return
 
-    notification_service.mute_user(target_user)
+    await notification_service.mute_user(target_user)
     await message.answer(f"🔕 Sound OFF for messages from '{target_user}'.")
 
 
@@ -323,7 +323,7 @@ async def cmd_unsilent(message: Message, command: CommandObject) -> None:
     # Если аргумент не передан, используем имя текущего пользователя
     if not target_user:
         try:
-            target_user = jira_service.get_current_user()
+            target_user = await jira_service.get_current_user()
             if not target_user:
                 await message.answer("Could not determine your Jira username. Please specify it explicitly: /unsilent username")
                 return
@@ -335,5 +335,5 @@ async def cmd_unsilent(message: Message, command: CommandObject) -> None:
         await message.answer(f"Messages from '{target_user}' are already audible (Sound ON).")
         return
 
-    notification_service.unmute_user(target_user)
+    await notification_service.unmute_user(target_user)
     await message.answer(f"🔔 Sound ON for messages from '{target_user}'.")
