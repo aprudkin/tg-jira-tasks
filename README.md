@@ -48,14 +48,7 @@ ALLOWED_USERS=123456789,987654321
 **Telegram User ID:**
 - Отправьте сообщение боту [@userinfobot](https://t.me/userinfobot) для получения вашего ID
 
-### Docker
-
-```bash
-docker build -t tg-jira-bot .
-docker run --env-file .env tg-jira-bot
-```
-
-### Docker Compose
+### Запуск через Docker Compose
 
 ```bash
 docker-compose up --build
