@@ -35,6 +35,7 @@ async def cmd_start(message: Message) -> None:
         "Available commands:\n"
         "/inwork - Tasks in progress\n"
         "/todo - Tasks in backlog\n"
+        "/waiting - Tasks in Discussion / Hold\n"
         "/sprint - Tasks in active sprint\n"
         "/recent - Tasks updated in last 24h\n"
         "/watching - Tasks I'm watching\n"
@@ -141,6 +142,27 @@ async def cmd_todo(message: Message) -> None:
 
     lines = [hbold("My backlog tasks:"), ""]
     lines.extend(format_task(task) for task in tasks)
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("waiting"))
+async def cmd_waiting(message: Message) -> None:
+    """Обработчик команды /waiting - показывает задачи в ожидании (Discussion / Hold)."""
+    await message.answer("Loading tasks...")
+
+    try:
+        tasks = await jira_service.get_waiting_tasks()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No tasks in Discussion / Hold status.")
+        return
+
+    lines = [hbold("Tasks waiting for decision:"), ""]
+    lines.extend(format_task(task, show_status=True) for task in tasks)
 
     await message.answer("\n".join(lines))
 

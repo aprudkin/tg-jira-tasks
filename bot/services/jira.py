@@ -134,6 +134,17 @@ class JiraService:
         )
         return self._search_issues(jql)
 
+    async def get_waiting_tasks(self) -> list[JiraTask]:
+        """Получает задачи в статусах Discussion / Hold."""
+        return await asyncio.to_thread(self._get_waiting_tasks_sync)
+
+    def _get_waiting_tasks_sync(self) -> list[JiraTask]:
+        jql = (
+            'assignee = currentUser() AND status in ("Discussion", "Hold", "On Hold") '
+            'AND resolution = Unresolved ORDER BY updated DESC'
+        )
+        return self._search_issues(jql)
+
     async def get_watching_tasks(self) -> list[JiraTask]:
         """Получает незакрытые задачи, которые я отслеживаю (watcher), где исполнитель не я."""
         return await asyncio.to_thread(self._get_watching_tasks_sync)
