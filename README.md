@@ -40,13 +40,8 @@ ALLOWED_USERS=123456789,987654321
 2. Отправьте `/newbot` и следуйте инструкциям
 3. Скопируйте полученный токен
 
-**Jira API Token (Cloud):**
-1. Перейдите в [Atlassian Account Settings](https://id.atlassian.com/manage-profile/security/api-tokens)
-2. Нажмите "Create API token"
-3. Скопируйте токен
-
 **Jira Personal Access Token (Data Center / Server):**
-1. Перейдите в ваш профиль Jira -> Personal Access Tokens
+1. Перейдите в ваш профиль [Jira -> Personal Access Tokens](https://jira.avosend.tech/secure/ViewProfile.jspa)
 2. Создайте новый токен
 3. Скопируйте токен и используйте в переменной `JIRA_PAT`
 
