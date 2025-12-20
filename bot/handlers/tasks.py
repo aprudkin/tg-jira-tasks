@@ -35,7 +35,7 @@ async def cmd_start(message: Message) -> None:
         "Available commands:\n"
         "/inwork - Tasks in progress\n"
         "/todo - Tasks in backlog\n"
-        "/waiting - Tasks in Discussion / Hold\n"
+        "/waiting - Tasks in Discussion / On Hold\n"
         "/sprint - Tasks in active sprint\n"
         "/recent - Tasks updated in last 24h\n"
         "/watching - Tasks I'm watching\n"
@@ -158,7 +158,7 @@ async def cmd_waiting(message: Message) -> None:
         return
 
     if not tasks:
-        await message.answer("No tasks in Discussion / Hold status.")
+        await message.answer("No tasks in Discussion / On Hold status.")
         return
 
     lines = [hbold("Tasks waiting for decision:"), ""]

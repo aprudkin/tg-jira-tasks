@@ -140,7 +140,7 @@ class JiraService:
 
     def _get_waiting_tasks_sync(self) -> list[JiraTask]:
         jql = (
-            'assignee = currentUser() AND status in ("Discussion", "Hold", "On Hold") '
+            'assignee = currentUser() AND status in ("Discussion", "On Hold") '
             'AND resolution = Unresolved ORDER BY updated DESC'
         )
         return self._search_issues(jql)
