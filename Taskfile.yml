@@ -1,0 +1,23 @@
+version: '3'
+
+vars:
+  REPO_ROOT:
+    sh: git rev-parse --show-toplevel
+
+includes:
+  docker:
+    taskfile: .tasks.d/docker.yml
+    optional: false
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list-all
+
+  init:
+    desc: Initialize development environment
+    cmds:
+      - task: docker:build
+      - task: docker:up
+      - echo "Bot stack is ready."

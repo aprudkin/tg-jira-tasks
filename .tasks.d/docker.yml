@@ -1,0 +1,41 @@
+version: '3'
+
+vars:
+  DOCKER_COMPOSE_CMD: docker compose
+
+tasks:
+  up:
+    desc: Start the stack in detached mode
+    cmds:
+      - "{{.DOCKER_COMPOSE_CMD}} up -d"
+
+  down:
+    desc: Stop the stack
+    cmds:
+      - "{{.DOCKER_COMPOSE_CMD}} down"
+
+  restart:
+    desc: Restart the stack
+    cmds:
+      - task: down
+      - task: up
+
+  logs:
+    desc: Follow logs
+    cmds:
+      - "{{.DOCKER_COMPOSE_CMD}} logs -f"
+
+  build:
+    desc: Build or rebuild services
+    cmds:
+      - "{{.DOCKER_COMPOSE_CMD}} build"
+
+  ps:
+    desc: List containers
+    cmds:
+      - "{{.DOCKER_COMPOSE_CMD}} ps"
+
+  shell:
+    desc: Access the bot container shell
+    cmds:
+      - "{{.DOCKER_COMPOSE_CMD}} exec bot /bin/bash"
