@@ -57,3 +57,4 @@ docker-compose.override.yml
 .agent/
 CLAUDE.md
 ANTIGRAVITY.md
+.osgrep
