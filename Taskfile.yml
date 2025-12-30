@@ -21,3 +21,18 @@ tasks:
       - task: docker:build
       - task: docker:up
       - echo "Bot stack is ready."
+
+  status:
+    desc: Show status of the bot stack
+    cmds:
+      - echo "=== 🐳 Контейнеры ==="
+      - task: docker:ps
+      - echo ""
+      - echo "=== 📊 Использование ресурсов ==="
+      - 'docker compose stats --no-stream --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.CPUPerc{{ "}}" }}\t{{ "{{" }}.MemUsage{{ "}}" }}\t{{ "{{" }}.NetIO{{ "}}" }}" 2>/dev/null || echo "Контейнеры не запущены"'
+      - echo ""
+      - echo "=== 💾 Volumes ==="
+      - 'docker volume ls --filter name=tg-jira-tasks --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.Driver{{ "}}" }}"'
+      - echo ""
+      - echo "=== 📦 Образы ==="
+      - docker compose images --format table
