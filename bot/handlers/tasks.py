@@ -7,6 +7,7 @@ from aiogram.utils.markdown import hbold, hlink
 
 from bot.services.jira import jira_service, JiraTask
 from bot.services.notifications import notification_service
+from bot.utils.things import generate_things_add_url, generate_things_json_url
 
 router = Router()
 
@@ -44,7 +45,11 @@ async def cmd_start(message: Message) -> None:
         "/sync [X] - Enable notifications (every X min, default 30)\n"
         "/unsync - Disable notifications\n"
         "/silent [user] - Mute notifications from user (default: self)\n"
-        "/unsilent [user] - Unmute notifications from user (default: self)"
+        "/unsilent [user] - Unmute notifications from user (default: self)\n\n"
+        "📲 Things integration (macOS/iOS):\n"
+        "/things - Export In Progress tasks\n"
+        "/things_sprint - Export sprint tasks\n"
+        "/things_todo - Export backlog tasks"
     )
 
 
@@ -66,7 +71,12 @@ async def cmd_inwork(message: Message) -> None:
     lines = [hbold("My tasks in progress:"), ""]
     lines.extend(format_task(task) for task in tasks)
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    if tasks:
+        json_url = generate_things_json_url(tasks)
+        lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("sprint"))
@@ -101,7 +111,11 @@ async def cmd_sprint(message: Message) -> None:
         lines.append(f"\n{hbold(status)}:")
         lines.extend(format_task(task) for task in tasks_by_status[status])
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    json_url = generate_things_json_url(tasks, project_name="Jira Sprint")
+    lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("byme"))
@@ -122,7 +136,11 @@ async def cmd_byme(message: Message) -> None:
     lines = [hbold("Tasks created by me (assigned to others):"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    json_url = generate_things_json_url(tasks)
+    lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("todo"))
@@ -143,7 +161,11 @@ async def cmd_todo(message: Message) -> None:
     lines = [hbold("My backlog tasks:"), ""]
     lines.extend(format_task(task) for task in tasks)
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    json_url = generate_things_json_url(tasks)
+    lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("waiting"))
@@ -164,7 +186,11 @@ async def cmd_waiting(message: Message) -> None:
     lines = [hbold("Tasks waiting for decision:"), ""]
     lines.extend(format_task(task, show_status=True) for task in tasks)
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    json_url = generate_things_json_url(tasks)
+    lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("recent"))
@@ -199,7 +225,11 @@ async def cmd_recent(message: Message) -> None:
         lines.append(f"\n{hbold(status)}:")
         lines.extend(format_task(task) for task in tasks_by_status[status])
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    json_url = generate_things_json_url(tasks)
+    lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("watching"))
@@ -220,7 +250,11 @@ async def cmd_watching(message: Message) -> None:
     lines = [hbold("Tasks I'm watching:"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
 
-    await message.answer("\n".join(lines))
+    # Ссылка для экспорта в Things
+    json_url = generate_things_json_url(tasks)
+    lines.append(f"\n<a href='{json_url}'>📲 Export to Things</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("stats"))
@@ -244,6 +278,90 @@ async def cmd_stats(message: Message) -> None:
     ]
 
     await message.answer("\n".join(lines))
+
+
+def format_things_task(task: JiraTask) -> str:
+    """Форматирует задачу со ссылкой на Things."""
+    things_url = generate_things_add_url(task)
+    return f"• <a href='{things_url}'>[{task.key}]</a> {task.summary}"
+
+
+@router.message(Command("things"))
+async def cmd_things(message: Message) -> None:
+    """Экспорт задач In Progress в Things."""
+    await message.answer("Loading tasks...")
+
+    try:
+        tasks = await jira_service.get_my_tasks_in_progress()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No tasks to export.")
+        return
+
+    lines = [hbold("📲 Export to Things (In Progress):"), ""]
+    lines.extend(format_things_task(task) for task in tasks)
+
+    # Массовый импорт
+    if len(tasks) > 1:
+        json_url = generate_things_json_url(tasks)
+        lines.append(f"\n<a href='{json_url}'>📦 Import all ({len(tasks)} tasks)</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("things_sprint"))
+async def cmd_things_sprint(message: Message) -> None:
+    """Экспорт задач спринта в Things."""
+    await message.answer("Loading sprint tasks...")
+
+    try:
+        tasks = await jira_service.get_my_tasks_in_sprint()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No sprint tasks to export.")
+        return
+
+    lines = [hbold("📲 Export to Things (Sprint):"), ""]
+    lines.extend(format_things_task(task) for task in tasks)
+
+    # Массовый импорт как проект
+    if len(tasks) > 1:
+        json_url = generate_things_json_url(tasks, project_name="Jira Sprint")
+        lines.append(f"\n<a href='{json_url}'>📦 Import as project ({len(tasks)} tasks)</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("things_todo"))
+async def cmd_things_todo(message: Message) -> None:
+    """Экспорт задач из бэклога в Things."""
+    await message.answer("Loading backlog tasks...")
+
+    try:
+        tasks = await jira_service.get_todo_tasks()
+    except Exception as e:
+        await message.answer(f"Error connecting to Jira: {e}")
+        return
+
+    if not tasks:
+        await message.answer("No backlog tasks to export.")
+        return
+
+    lines = [hbold("📲 Export to Things (Backlog):"), ""]
+    lines.extend(format_things_task(task) for task in tasks)
+
+    # Массовый импорт
+    if len(tasks) > 1:
+        json_url = generate_things_json_url(tasks)
+        lines.append(f"\n<a href='{json_url}'>📦 Import all ({len(tasks)} tasks)</a>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("sync"))
