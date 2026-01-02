@@ -168,6 +168,41 @@ Benefits:
 - Easy to modify filters
 - Handlers don't know JQL syntax
 
+### Loading Message Auto-Delete
+
+Loading messages are automatically deleted after data is loaded:
+
+```python
+LOADING_DELETE_DELAY = 5  # seconds
+
+def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
+    async def _delete_later() -> None:
+        await asyncio.sleep(delay)
+        try:
+            await msg.delete()
+        except Exception:
+            pass  # Ignore if already deleted
+    asyncio.create_task(_delete_later())
+```
+
+Usage in handlers:
+
+```python
+loading_msg = await message.answer("Loading tasks...")
+try:
+    tasks = await jira_service.get_my_tasks_in_progress()
+except Exception as e:
+    await message.answer(f"Error: {e}")
+    return
+finally:
+    schedule_delete(loading_msg)  # Delete after 5 seconds
+```
+
+Benefits:
+- Cleaner chat history
+- Non-blocking (async task runs in background)
+- Error-safe (handles already deleted messages)
+
 ### Background Tasks
 
 Notification service uses `asyncio.Task` for polling:
