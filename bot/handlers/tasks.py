@@ -3,7 +3,7 @@ from collections import defaultdict
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import Message
 from aiogram.utils.markdown import hbold, hlink
 
 from bot.services.jira import jira_service, JiraTask
@@ -313,27 +313,10 @@ async def cmd_stats(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
-def build_things_keyboard(tasks: list[JiraTask], project_name: str | None = None) -> InlineKeyboardMarkup:
-    """Создаёт клавиатуру с кнопками для экспорта в Things."""
-    buttons = []
-
-    # Кнопки для каждой задачи
-    for task in tasks:
-        things_url = generate_things_add_url(task)
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"➕ [{task.key}] {task.summary[:40]}{'...' if len(task.summary) > 40 else ''}",
-                url=things_url
-            )
-        ])
-
-    # Кнопка для массового импорта
-    if len(tasks) > 1:
-        json_url = generate_things_json_url(tasks, project_name=project_name)
-        label = f"📦 Импортировать все ({len(tasks)})"
-        buttons.append([InlineKeyboardButton(text=label, url=json_url)])
-
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+def format_things_copyable(task: JiraTask) -> str:
+    """Форматирует задачу с копируемым URL для Things."""
+    things_url = generate_things_add_url(task)
+    return f"<b>[{task.key}]</b> {task.summary}\n<code>{things_url}</code>"
 
 
 @router.message(Command("things"))
@@ -353,13 +336,21 @@ async def cmd_things(message: Message) -> None:
         await message.answer("No tasks to export.")
         return
 
-    keyboard = build_things_keyboard(tasks)
-    await message.answer(
-        f"📲 <b>Export to Things (In Progress)</b>\n\n"
-        f"Нажмите кнопку для добавления задачи в Things:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    lines = [
+        "📲 <b>Export to Things (In Progress)</b>",
+        "",
+        "Скопируйте URL и откройте в Safari на Mac/iOS:",
+        "",
+    ]
+    lines.extend(format_things_copyable(task) for task in tasks)
+
+    # Массовый импорт
+    if len(tasks) > 1:
+        json_url = generate_things_json_url(tasks)
+        lines.append(f"\n📦 <b>Импорт всех ({len(tasks)}):</b>")
+        lines.append(f"<code>{json_url}</code>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("things_sprint"))
@@ -379,13 +370,21 @@ async def cmd_things_sprint(message: Message) -> None:
         await message.answer("No sprint tasks to export.")
         return
 
-    keyboard = build_things_keyboard(tasks, project_name="Jira Sprint")
-    await message.answer(
-        f"📲 <b>Export to Things (Sprint)</b>\n\n"
-        f"Нажмите кнопку для добавления задачи в Things:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    lines = [
+        "📲 <b>Export to Things (Sprint)</b>",
+        "",
+        "Скопируйте URL и откройте в Safari на Mac/iOS:",
+        "",
+    ]
+    lines.extend(format_things_copyable(task) for task in tasks)
+
+    # Массовый импорт как проект
+    if len(tasks) > 1:
+        json_url = generate_things_json_url(tasks, project_name="Jira Sprint")
+        lines.append(f"\n📦 <b>Импорт как проект ({len(tasks)}):</b>")
+        lines.append(f"<code>{json_url}</code>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("things_todo"))
@@ -405,13 +404,21 @@ async def cmd_things_todo(message: Message) -> None:
         await message.answer("No backlog tasks to export.")
         return
 
-    keyboard = build_things_keyboard(tasks)
-    await message.answer(
-        f"📲 <b>Export to Things (Backlog)</b>\n\n"
-        f"Нажмите кнопку для добавления задачи в Things:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    lines = [
+        "📲 <b>Export to Things (Backlog)</b>",
+        "",
+        "Скопируйте URL и откройте в Safari на Mac/iOS:",
+        "",
+    ]
+    lines.extend(format_things_copyable(task) for task in tasks)
+
+    # Массовый импорт
+    if len(tasks) > 1:
+        json_url = generate_things_json_url(tasks)
+        lines.append(f"\n📦 <b>Импорт всех ({len(tasks)}):</b>")
+        lines.append(f"<code>{json_url}</code>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("sync"))
