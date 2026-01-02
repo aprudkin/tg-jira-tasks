@@ -50,7 +50,7 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "🎫 <b>Jira Tasks Bot</b>\n\n"
         "📋 <b>Просмотр задач:</b>\n"
-        "/inwork — Задачи в работе (In Progress)\n"
+        "/inprog — Задачи в работе (In Progress)\n"
         "/todo — Задачи в бэклоге\n"
         "/waiting — Задачи в ожидании (Discussion / Hold)\n"
         "/sprint — Задачи в активном спринте\n"
@@ -70,9 +70,9 @@ async def cmd_start(message: Message) -> None:
     )
 
 
-@router.message(Command("inwork"))
-async def cmd_inwork(message: Message) -> None:
-    """Обработчик команды /inwork - показывает задачи в работе."""
+@router.message(Command("inprog"))
+async def cmd_inprog(message: Message) -> None:
+    """Обработчик команды /inprog - показывает задачи в работе."""
     loading_msg = await message.answer("Loading tasks...")
 
     try:
