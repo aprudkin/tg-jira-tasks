@@ -1,3 +1,4 @@
+import asyncio
 from collections import defaultdict
 
 from aiogram import Router
@@ -13,6 +14,21 @@ router = Router()
 
 # Интервал по умолчанию для уведомлений (в минутах)
 DEFAULT_NOTIFICATION_INTERVAL = 30
+
+# Задержка перед удалением loading-сообщения (в секундах)
+LOADING_DELETE_DELAY = 5
+
+
+def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
+    """Планирует удаление сообщения через указанное время."""
+    async def _delete_later() -> None:
+        await asyncio.sleep(delay)
+        try:
+            await msg.delete()
+        except Exception:
+            # Игнорируем ошибки удаления (сообщение уже удалено и т.д.)
+            pass
+    asyncio.create_task(_delete_later())
 
 
 def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool = False) -> str:
@@ -57,13 +73,15 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("inwork"))
 async def cmd_inwork(message: Message) -> None:
     """Обработчик команды /inwork - показывает задачи в работе."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_my_tasks_in_progress()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No tasks in 'In Progress' status.")
@@ -83,13 +101,15 @@ async def cmd_inwork(message: Message) -> None:
 @router.message(Command("sprint"))
 async def cmd_sprint(message: Message) -> None:
     """Обработчик команды /sprint - показывает задачи в спринте, сгруппированные по статусу."""
-    await message.answer("Loading sprint tasks...")
+    loading_msg = await message.answer("Loading sprint tasks...")
 
     try:
         tasks = await jira_service.get_my_tasks_in_sprint()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No tasks found in active sprint.")
@@ -122,13 +142,15 @@ async def cmd_sprint(message: Message) -> None:
 @router.message(Command("byme"))
 async def cmd_byme(message: Message) -> None:
     """Обработчик команды /byme - показывает незавершённые задачи, созданные мной."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_tasks_created_by_me()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No unresolved tasks created by you (assigned to others).")
@@ -147,13 +169,15 @@ async def cmd_byme(message: Message) -> None:
 @router.message(Command("todo"))
 async def cmd_todo(message: Message) -> None:
     """Обработчик команды /todo - показывает задачи в бэклоге."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_todo_tasks()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No tasks in backlog (To Do / Backlog / Open).")
@@ -172,13 +196,15 @@ async def cmd_todo(message: Message) -> None:
 @router.message(Command("waiting"))
 async def cmd_waiting(message: Message) -> None:
     """Обработчик команды /waiting - показывает задачи в ожидании (Discussion / Hold)."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_waiting_tasks()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No tasks in Discussion / On Hold status.")
@@ -197,13 +223,15 @@ async def cmd_waiting(message: Message) -> None:
 @router.message(Command("recent"))
 async def cmd_recent(message: Message) -> None:
     """Обработчик команды /recent - показывает недавно обновлённые задачи, сгруппированные по статусу."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_recent_tasks(hours=24)
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No tasks updated in the last 24 hours.")
@@ -236,13 +264,15 @@ async def cmd_recent(message: Message) -> None:
 @router.message(Command("watching"))
 async def cmd_watching(message: Message) -> None:
     """Обработчик команды /watching - показывает задачи, которые я отслеживаю."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_watching_tasks()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("You are not watching any unresolved tasks (assigned to others).")
@@ -261,13 +291,15 @@ async def cmd_watching(message: Message) -> None:
 @router.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
     """Обработчик команды /stats - показывает статистику по задачам."""
-    await message.answer("Loading stats...")
+    loading_msg = await message.answer("Loading stats...")
 
     try:
         stats = await jira_service.get_stats()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     lines = [
         hbold("📊 My task statistics:"),
@@ -290,13 +322,15 @@ def format_things_task(task: JiraTask) -> str:
 @router.message(Command("things"))
 async def cmd_things(message: Message) -> None:
     """Экспорт задач In Progress в Things."""
-    await message.answer("Loading tasks...")
+    loading_msg = await message.answer("Loading tasks...")
 
     try:
         tasks = await jira_service.get_my_tasks_in_progress()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No tasks to export.")
@@ -316,13 +350,15 @@ async def cmd_things(message: Message) -> None:
 @router.message(Command("things_sprint"))
 async def cmd_things_sprint(message: Message) -> None:
     """Экспорт задач спринта в Things."""
-    await message.answer("Loading sprint tasks...")
+    loading_msg = await message.answer("Loading sprint tasks...")
 
     try:
         tasks = await jira_service.get_my_tasks_in_sprint()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No sprint tasks to export.")
@@ -342,13 +378,15 @@ async def cmd_things_sprint(message: Message) -> None:
 @router.message(Command("things_todo"))
 async def cmd_things_todo(message: Message) -> None:
     """Экспорт задач из бэклога в Things."""
-    await message.answer("Loading backlog tasks...")
+    loading_msg = await message.answer("Loading backlog tasks...")
 
     try:
         tasks = await jira_service.get_todo_tasks()
     except Exception as e:
         await message.answer(f"Error connecting to Jira: {e}")
         return
+    finally:
+        schedule_delete(loading_msg)
 
     if not tasks:
         await message.answer("No backlog tasks to export.")
