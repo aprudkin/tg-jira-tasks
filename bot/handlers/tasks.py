@@ -85,7 +85,7 @@ async def cmd_inprog(message: Message) -> None:
     lines = [hbold("My tasks in progress:"), ""]
     lines.extend(format_task(task) for task in tasks)
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("sprint"))
@@ -122,7 +122,7 @@ async def cmd_sprint(message: Message) -> None:
         lines.append(f"\n{hbold(status)}:")
         lines.extend(format_task(task) for task in tasks_by_status[status])
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("byme"))
@@ -145,7 +145,7 @@ async def cmd_byme(message: Message) -> None:
     lines = [hbold("Tasks created by me (assigned to others):"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("todo"))
@@ -168,7 +168,7 @@ async def cmd_todo(message: Message) -> None:
     lines = [hbold("My backlog tasks:"), ""]
     lines.extend(format_task(task) for task in tasks)
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("waiting"))
@@ -191,7 +191,7 @@ async def cmd_waiting(message: Message) -> None:
     lines = [hbold("Tasks waiting for decision:"), ""]
     lines.extend(format_task(task, show_status=True) for task in tasks)
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("recent"))
@@ -228,7 +228,7 @@ async def cmd_recent(message: Message) -> None:
         lines.append(f"\n{hbold(status)}:")
         lines.extend(format_task(task) for task in tasks_by_status[status])
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("watching"))
@@ -251,7 +251,7 @@ async def cmd_watching(message: Message) -> None:
     lines = [hbold("Tasks I'm watching:"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
 
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("stats"))
