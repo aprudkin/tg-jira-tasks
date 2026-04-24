@@ -1,9 +1,13 @@
 services:
   bot:
+    container_name: tg-jira-bot
     build: .
     env_file:
       - .env
-    restart: unless-stopped
+    restart: always
+    stop_grace_period: 10s
+    mem_limit: 256m
+    cpus: "0.5"
     volumes:
       - bot_data:/app/data
 
