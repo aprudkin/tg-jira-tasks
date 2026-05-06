@@ -356,26 +356,36 @@ async def cmd_unsync(message: Message) -> None:
         await message.answer("Failed to disable notifications.")
 
 
+async def _resolve_target_user(message: Message, command: CommandObject) -> str | None:
+    """Возвращает имя Jira-пользователя из аргумента команды или текущего пользователя.
+
+    При ошибке отвечает пользователю сам и возвращает None — caller просто делает return.
+    """
+    if command.args and command.args.strip():
+        return command.args.strip()
+    try:
+        user = await jira_service.get_current_user()
+    except Exception:
+        logger.exception("Failed to fetch current Jira user")
+        await message.answer("⚠️ Could not determine your Jira username.")
+        return None
+    if not user:
+        await message.answer(
+            f"Could not determine your Jira username. "
+            f"Please specify it explicitly: {command.prefix}{command.command} username"
+        )
+        return None
+    return user
+
+
 @router.message(Command("silent"))
 async def cmd_silent(message: Message, command: CommandObject) -> None:
     """Обработчик команды /silent - включает/выключает тихий режим для пользователя."""
-    target_user = command.args.strip() if command.args else None
+    target_user = await _resolve_target_user(message, command)
+    if target_user is None:
+        return
 
-    # Если аргумент не передан, используем имя текущего пользователя
-    if not target_user:
-        try:
-            target_user = await jira_service.get_current_user()
-            if not target_user:
-                await message.answer("Could not determine your Jira username. Please specify it explicitly: /silent username")
-                return
-        except Exception:
-            logger.exception("Failed to fetch current Jira user")
-            await message.answer("⚠️ Could not determine your Jira username.")
-            return
-
-    is_silent = notification_service.is_user_silent(target_user)
-
-    if is_silent:
+    if notification_service.is_user_silent(target_user):
         await message.answer(f"Messages from '{target_user}' are already silent (Sound OFF).")
         return
 
@@ -386,19 +396,9 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
 @router.message(Command("unsilent"))
 async def cmd_unsilent(message: Message, command: CommandObject) -> None:
     """Обработчик команды /unsilent - включает звук для пользователя."""
-    target_user = command.args.strip() if command.args else None
-
-    # Если аргумент не передан, используем имя текущего пользователя
-    if not target_user:
-        try:
-            target_user = await jira_service.get_current_user()
-            if not target_user:
-                await message.answer("Could not determine your Jira username. Please specify it explicitly: /unsilent username")
-                return
-        except Exception:
-            logger.exception("Failed to fetch current Jira user")
-            await message.answer("⚠️ Could not determine your Jira username.")
-            return
+    target_user = await _resolve_target_user(message, command)
+    if target_user is None:
+        return
 
     if not notification_service.is_user_silent(target_user):
         await message.answer(f"Messages from '{target_user}' are already audible (Sound ON).")
