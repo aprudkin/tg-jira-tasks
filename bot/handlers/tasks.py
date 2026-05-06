@@ -17,6 +17,9 @@ DEFAULT_NOTIFICATION_INTERVAL = 30
 # Задержка перед удалением loading-сообщения (в секундах)
 LOADING_DELETE_DELAY = 5
 
+# Удерживаем ссылки на фоновые задачи, чтобы их не собрал GC до завершения.
+_pending_tasks: set[asyncio.Task] = set()
+
 
 def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
     """Планирует удаление сообщения через указанное время."""
@@ -27,7 +30,9 @@ def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
         except Exception:
             # Игнорируем ошибки удаления (сообщение уже удалено и т.д.)
             pass
-    asyncio.create_task(_delete_later())
+    task = asyncio.create_task(_delete_later())
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
 
 
 def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool = False) -> str:
@@ -41,6 +46,25 @@ def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool =
             details.append(task.status)
         line += f"\n  └ {' | '.join(details)}"
     return line
+
+
+def render_grouped_by_status(
+    tasks: list[JiraTask], title: str, status_order: list[str]
+) -> str:
+    """Группирует задачи по статусу в заданном порядке и форматирует ответ."""
+    by_status: dict[str, list[JiraTask]] = defaultdict(list)
+    for task in tasks:
+        by_status[task.status].append(task)
+
+    # Сначала статусы из явного порядка, затем все остальные
+    statuses = [s for s in status_order if s in by_status]
+    statuses.extend(s for s in by_status if s not in status_order)
+
+    lines = [hbold(title), ""]
+    for status in statuses:
+        lines.append(f"\n{hbold(status)}:")
+        lines.extend(format_task(task) for task in by_status[status])
+    return "\n".join(lines)
 
 
 @router.message(Command("start"))
@@ -105,24 +129,11 @@ async def cmd_sprint(message: Message) -> None:
         await message.answer("No tasks found in active sprint.")
         return
 
-    # Группировка по статусу с defaultdict
-    tasks_by_status: dict[str, list[JiraTask]] = defaultdict(list)
-    for task in tasks:
-        tasks_by_status[task.status].append(task)
-
-    lines = [hbold("My sprint tasks:"), ""]
-
-    # Порядок сортировки статусов
-    status_order = ["In Progress", "Discussion", "Hold", "Backlog", "Resolved"]
-    # Собираем все статусы: сначала из порядка, потом остальные
-    all_statuses = [s for s in status_order if s in tasks_by_status]
-    all_statuses.extend(s for s in tasks_by_status if s not in status_order)
-
-    for status in all_statuses:
-        lines.append(f"\n{hbold(status)}:")
-        lines.extend(format_task(task) for task in tasks_by_status[status])
-
-    await message.answer("\n".join(lines))
+    await message.answer(render_grouped_by_status(
+        tasks,
+        title="My sprint tasks:",
+        status_order=["In Progress", "Discussion", "Hold", "Backlog", "Resolved"],
+    ))
 
 
 @router.message(Command("byme"))
@@ -211,24 +222,11 @@ async def cmd_recent(message: Message) -> None:
         await message.answer("No tasks updated in the last 24 hours.")
         return
 
-    # Группировка по статусу
-    tasks_by_status: dict[str, list[JiraTask]] = defaultdict(list)
-    for task in tasks:
-        tasks_by_status[task.status].append(task)
-
-    lines = [hbold("Tasks updated in last 24h:"), ""]
-
-    # Порядок статусов по важности
-    status_order = ["In Progress", "Reopened", "Discussion", "On Hold", "Resolved", "Closed"]
-    # Собираем все статусы: сначала из порядка, потом остальные
-    all_statuses = [s for s in status_order if s in tasks_by_status]
-    all_statuses.extend(s for s in tasks_by_status if s not in status_order)
-
-    for status in all_statuses:
-        lines.append(f"\n{hbold(status)}:")
-        lines.extend(format_task(task) for task in tasks_by_status[status])
-
-    await message.answer("\n".join(lines))
+    await message.answer(render_grouped_by_status(
+        tasks,
+        title="Tasks updated in last 24h:",
+        status_order=["In Progress", "Reopened", "Discussion", "On Hold", "Resolved", "Closed"],
+    ))
 
 
 @router.message(Command("watching"))
