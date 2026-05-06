@@ -20,6 +20,9 @@ DEFAULT_NOTIFICATION_INTERVAL = 30
 # Сообщение пользователю при ошибке Jira (детали — только в логах с exc_info)
 JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 
+# Текст loading-сообщения для большинства команд
+LOADING_TASKS = "Loading tasks..."
+
 # Задержка перед удалением loading-сообщения (в секундах)
 LOADING_DELETE_DELAY = 5
 
@@ -52,6 +55,30 @@ def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool =
             details.append(task.status)
         line += f"\n  └ {' | '.join(details)}"
     return line
+
+
+class _Failed:
+    """Маркер: fetch упал, _safe_fetch уже ответил пользователю и залогировал."""
+
+# Singleton, проверяется через `is _FAILED`
+_FAILED = _Failed()
+
+
+async def _safe_fetch(message: Message, loading_text: str, fetch):
+    """Шлёт loading-сообщение, ждёт fetch, удаляет loader. При исключении
+    логирует и отвечает пользователю generic-сообщением; возвращает _FAILED.
+
+    Caller: `result = await _safe_fetch(...); if result is _FAILED: return`.
+    """
+    loading_msg = await message.answer(loading_text)
+    try:
+        return await fetch()
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
+        return _FAILED
+    finally:
+        schedule_delete(loading_msg)
 
 
 def render_grouped_by_status(
@@ -98,41 +125,24 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("inprog"))
 async def cmd_inprog(message: Message) -> None:
     """Обработчик команды /inprog - показывает задачи в работе."""
-    loading_msg = await message.answer("Loading tasks...")
-
-    try:
-        tasks = await jira_service.get_my_tasks_in_progress()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, LOADING_TASKS, jira_service.get_my_tasks_in_progress)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("No tasks in 'In Progress' status.")
         return
 
     lines = [hbold("My tasks in progress:"), ""]
     lines.extend(format_task(task) for task in tasks)
-
     await message.answer("\n".join(lines))
 
 
 @router.message(Command("sprint"))
 async def cmd_sprint(message: Message) -> None:
     """Обработчик команды /sprint - показывает задачи в спринте, сгруппированные по статусу."""
-    loading_msg = await message.answer("Loading sprint tasks...")
-
-    try:
-        tasks = await jira_service.get_my_tasks_in_sprint()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, "Loading sprint tasks...", jira_service.get_my_tasks_in_sprint)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("No tasks found in active sprint.")
         return
@@ -147,89 +157,54 @@ async def cmd_sprint(message: Message) -> None:
 @router.message(Command("byme"))
 async def cmd_byme(message: Message) -> None:
     """Обработчик команды /byme - показывает незавершённые задачи, созданные мной."""
-    loading_msg = await message.answer("Loading tasks...")
-
-    try:
-        tasks = await jira_service.get_tasks_created_by_me()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, LOADING_TASKS, jira_service.get_tasks_created_by_me)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("No unresolved tasks created by you (assigned to others).")
         return
 
     lines = [hbold("Tasks created by me (assigned to others):"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
-
     await message.answer("\n".join(lines))
 
 
 @router.message(Command("todo"))
 async def cmd_todo(message: Message) -> None:
     """Обработчик команды /todo - показывает задачи в бэклоге."""
-    loading_msg = await message.answer("Loading tasks...")
-
-    try:
-        tasks = await jira_service.get_todo_tasks()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, LOADING_TASKS, jira_service.get_todo_tasks)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("No tasks in backlog (To Do / Backlog / Open).")
         return
 
     lines = [hbold("My backlog tasks:"), ""]
     lines.extend(format_task(task) for task in tasks)
-
     await message.answer("\n".join(lines))
 
 
 @router.message(Command("waiting"))
 async def cmd_waiting(message: Message) -> None:
     """Обработчик команды /waiting - показывает задачи в ожидании (Discussion / Hold)."""
-    loading_msg = await message.answer("Loading tasks...")
-
-    try:
-        tasks = await jira_service.get_waiting_tasks()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, LOADING_TASKS, jira_service.get_waiting_tasks)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("No tasks in Discussion / On Hold status.")
         return
 
     lines = [hbold("Tasks waiting for decision:"), ""]
     lines.extend(format_task(task, show_status=True) for task in tasks)
-
     await message.answer("\n".join(lines))
 
 
 @router.message(Command("recent"))
 async def cmd_recent(message: Message) -> None:
     """Обработчик команды /recent - показывает недавно обновлённые задачи, сгруппированные по статусу."""
-    loading_msg = await message.answer("Loading tasks...")
-
-    try:
-        tasks = await jira_service.get_recent_tasks(hours=24)
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, LOADING_TASKS, jira_service.get_recent_tasks)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("No tasks updated in the last 24 hours.")
         return
@@ -244,40 +219,24 @@ async def cmd_recent(message: Message) -> None:
 @router.message(Command("watching"))
 async def cmd_watching(message: Message) -> None:
     """Обработчик команды /watching - показывает задачи, которые я отслеживаю."""
-    loading_msg = await message.answer("Loading tasks...")
-
-    try:
-        tasks = await jira_service.get_watching_tasks()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    tasks = await _safe_fetch(message, LOADING_TASKS, jira_service.get_watching_tasks)
+    if tasks is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
-
     if not tasks:
         await message.answer("You are not watching any unresolved tasks (assigned to others).")
         return
 
     lines = [hbold("Tasks I'm watching:"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
-
     await message.answer("\n".join(lines))
 
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
     """Обработчик команды /stats - показывает статистику по задачам."""
-    loading_msg = await message.answer("Loading stats...")
-
-    try:
-        stats = await jira_service.get_stats()
-    except Exception:
-        logger.exception("Jira call failed")
-        await message.answer(JIRA_ERROR_MESSAGE)
+    stats = await _safe_fetch(message, "Loading stats...", jira_service.get_stats)
+    if stats is _FAILED:
         return
-    finally:
-        schedule_delete(loading_msg)
 
     lines = [
         hbold("📊 My task statistics:"),
@@ -287,7 +246,6 @@ async def cmd_stats(message: Message) -> None:
         f"✅ Resolved this week: {stats.resolved_this_week}",
         f"📌 Total open: {stats.total_assigned}",
     ]
-
     await message.answer("\n".join(lines))
 
 
