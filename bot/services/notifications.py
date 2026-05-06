@@ -101,7 +101,12 @@ class NotificationService:
                 },
                 "silent_users": list(self._silent_users),
             }
-            STATE_FILE.write_text(json.dumps(data))
+            # Пишем во временный файл и атомарно подменяем — иначе падение
+            # бота посреди write_text оставит обрезанный JSON, а _load_state
+            # молча сбросит дедуп и подписку.
+            tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(STATE_FILE)
             logger.info("Subscription state saved")
         except Exception as e:
             logger.error(f"Error saving state: {e}")
