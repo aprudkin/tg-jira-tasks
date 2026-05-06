@@ -164,41 +164,27 @@ class JiraService:
         return self._search_issues(jql, include_assignee=True)
 
     async def get_stats(self) -> JiraStats:
-        """Получает статистику по задачам."""
-        return await asyncio.to_thread(self._get_stats_sync)
-
-    def _get_stats_sync(self) -> JiraStats:
-        # Задачи в работе
-        in_progress = self.client.search_issues(
+        """Получает статистику по задачам параллельно."""
+        jqls = (
             'assignee = currentUser() AND status = "In Progress"',
-            maxResults=0,
-        ).total
-
-        # Задачи в бэклоге
-        in_backlog = self.client.search_issues(
             'assignee = currentUser() AND status in ("To Do", "Backlog", "Open") '
             'AND resolution = Unresolved',
-            maxResults=0,
-        ).total
-
-        # Закрыто за эту неделю
-        resolved_this_week = self.client.search_issues(
             'assignee = currentUser() AND resolved >= startOfWeek()',
-            maxResults=0,
-        ).total
-
-        # Всего открытых задач
-        total_assigned = self.client.search_issues(
             'assignee = currentUser() AND resolution = Unresolved',
-            maxResults=0,
-        ).total
-
+        )
+        in_progress, in_backlog, resolved_this_week, total_assigned = await asyncio.gather(
+            *(asyncio.to_thread(self._count_issues, jql) for jql in jqls)
+        )
         return JiraStats(
             in_progress=in_progress,
             in_backlog=in_backlog,
             resolved_this_week=resolved_this_week,
             total_assigned=total_assigned,
         )
+
+    def _count_issues(self, jql: str) -> int:
+        """Возвращает количество задач, соответствующих JQL."""
+        return self.client.search_issues(jql, maxResults=0).total
 
     def _search_issues(self, jql: str, include_assignee: bool = False) -> list[JiraTask]:
         """Выполняет поиск задач и возвращает список объектов JiraTask."""
