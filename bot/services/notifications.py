@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.utils.markdown import hbold, hlink
 
 from bot.config import settings
@@ -261,14 +262,27 @@ class NotificationService:
         for i, event in enumerate(events):
             if i > 0:
                 await asyncio.sleep(SEND_DELAY_SECONDS)
+            await self._send_one(chat_id, event)
+
+    async def _send_one(self, chat_id: int, event: JiraEvent) -> None:
+        """Отправляет одно событие с retry на TelegramRetryAfter (HTTP 429)."""
+        for attempt in range(2):
             try:
                 await self._bot.send_message(
                     chat_id,
                     self._format_event(event),
                     disable_notification=event.author_id in self._silent_users,
                 )
+                return
+            except TelegramRetryAfter as e:
+                if attempt == 0:
+                    logger.warning(f"Telegram rate-limit, sleeping {e.retry_after}s")
+                    await asyncio.sleep(e.retry_after)
+                    continue
+                logger.error(f"Rate-limited twice for chat {chat_id}, dropping event {event.id}")
             except Exception as e:
                 logger.error(f"Error sending notification to {chat_id}: {e}")
+                return
 
     def _format_event(self, event: JiraEvent) -> str:
         """Форматирует событие для отправки."""

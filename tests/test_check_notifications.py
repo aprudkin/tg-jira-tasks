@@ -140,6 +140,68 @@ async def test_check_skipped_without_subscription(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_telegram_rate_limit_triggers_retry(svc, monkeypatch):
+    """При TelegramRetryAfter ждём retry_after секунд и повторяем send_message."""
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendMessage
+
+    sleep_calls: list[float] = []
+    real_sleep = nots.asyncio.sleep
+    async def fake_sleep(d):
+        sleep_calls.append(d)
+        # Не блокируем тест на реальные секунды
+        await real_sleep(0)
+    monkeypatch.setattr("bot.services.notifications.asyncio.sleep", fake_sleep)
+
+    call_count = 0
+    async def flaky_send(*a, **kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise TelegramRetryAfter(method=SendMessage(chat_id=0, text=""), message="slow", retry_after=7)
+    svc._bot.send_message = AsyncMock(side_effect=flaky_send)
+
+    events = [_evt("X-1", "c1")]
+    monkeypatch.setattr(
+        "bot.services.notifications.jira_service.get_events_since",
+        AsyncMock(return_value=events),
+    )
+
+    await svc._check_notifications()
+
+    assert call_count == 2  # первый — 429, второй — успех
+    assert 7 in sleep_calls
+    assert svc._processed_events["X-1"] == {"c1"}
+
+
+@pytest.mark.asyncio
+async def test_telegram_rate_limit_gives_up_after_one_retry(svc, monkeypatch):
+    """После двух подряд 429 событие дропается, чтобы не висеть."""
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendMessage
+
+    real_sleep = nots.asyncio.sleep
+    async def fake_sleep(d):
+        await real_sleep(0)
+    monkeypatch.setattr("bot.services.notifications.asyncio.sleep", fake_sleep)
+
+    async def always_429(*a, **kw):
+        raise TelegramRetryAfter(method=SendMessage(chat_id=0, text=""), message="slow", retry_after=1)
+    svc._bot.send_message = AsyncMock(side_effect=always_429)
+
+    events = [_evt("X-1", "c1")]
+    monkeypatch.setattr(
+        "bot.services.notifications.jira_service.get_events_since",
+        AsyncMock(return_value=events),
+    )
+
+    await svc._check_notifications()
+
+    # 2 attempt'а, не больше (no infinite loop)
+    assert svc._bot.send_message.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_silent_user_disables_notification_sound(svc, monkeypatch):
     svc._silent_users = {"bob"}
     events = [_evt("X-1", "c1")]
