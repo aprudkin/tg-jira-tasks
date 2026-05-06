@@ -10,6 +10,11 @@ from bot.config import settings
 logger = logging.getLogger(__name__)
 
 
+def utc_now_naive() -> datetime:
+    """Текущее время в UTC без tzinfo — формат для сравнений с разобранными датами Jira."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 @dataclass
 class JiraTask:
     """Представление задачи Jira."""
@@ -44,7 +49,7 @@ class JiraEvent:
     author_id: str
     details: str
     id: str  # Unique ID for deduplication
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=utc_now_naive)
 
 
 @dataclass

@@ -7,7 +7,7 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.utils.markdown import hbold, hlink
 
-from bot.services.jira import jira_service, JiraEvent
+from bot.services.jira import jira_service, JiraEvent, utc_now_naive
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class NotificationService:
 
                 # last_check ставим на текущее время, чтобы не слать старые уведомления
                 if self._chat_id is not None:
-                    self._last_check = datetime.now()
+                    self._last_check = utc_now_naive()
                     logger.info(f"Restored subscription (chat_id={self._chat_id}, interval={self._interval_minutes} min)")
         except Exception as e:
             logger.error(f"Error loading state: {e}")
@@ -94,7 +94,7 @@ class NotificationService:
         if self._chat_id is not None:
             return False
         self._chat_id = chat_id
-        self._last_check = datetime.now()
+        self._last_check = utc_now_naive()
         self._interval_minutes = interval_minutes or self.DEFAULT_INTERVAL_MINUTES
         await self._save_state()
         logger.info(f"Subscribed to notifications (interval: {self._interval_minutes} min)")
@@ -224,7 +224,7 @@ class NotificationService:
                     await self._save_state()
 
             # Обновляем время последней проверки
-            self._last_check = datetime.now()
+            self._last_check = utc_now_naive()
 
         except Exception as e:
             logger.error(f"Error checking events: {e}")
