@@ -14,6 +14,23 @@ logger = logging.getLogger(__name__)
 # Путь к файлу состояния (в Docker монтируется через volume)
 STATE_FILE = Path("/app/data/sync_state.json")
 
+# Задержка между уведомлениями, чтобы не упереться в rate-limit Telegram
+SEND_DELAY_SECONDS = 0.5
+
+# Иконки и заголовки событий (модульный уровень — не пересоздаём dict на каждое событие)
+EVENT_ICONS = {
+    "created": "🆕",
+    "comment": "💬",
+    "status_change": "🔄",
+    "assigned": "👤",
+}
+EVENT_TITLES = {
+    "created": "Новая задача",
+    "comment": "Новый комментарий",
+    "status_change": "Изменение статуса",
+    "assigned": "Назначение",
+}
+
 
 class NotificationService:
     """Сервис для отправки уведомлений о событиях Jira."""
@@ -231,46 +248,28 @@ class NotificationService:
         if not self._bot:
             return
 
-        for event in events:
-            message = self._format_event(event)
-            disable_notification = event.author_id in self._silent_users
-
+        for i, event in enumerate(events):
+            if i > 0:
+                await asyncio.sleep(SEND_DELAY_SECONDS)
             try:
                 await self._bot.send_message(
                     chat_id,
-                    message,
-                    disable_notification=disable_notification
+                    self._format_event(event),
+                    disable_notification=event.author_id in self._silent_users,
                 )
-                # Небольшая задержка между сообщениями
-                await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Error sending notification to {chat_id}: {e}")
 
     def _format_event(self, event: JiraEvent) -> str:
         """Форматирует событие для отправки."""
-        event_icons = {
-            "created": "🆕",
-            "comment": "💬",
-            "status_change": "🔄",
-            "assigned": "👤",
-        }
-        icon = event_icons.get(event.event_type, "📌")
-
-        event_titles = {
-            "created": "Новая задача",
-            "comment": "Новый комментарий",
-            "status_change": "Изменение статуса",
-            "assigned": "Назначение",
-        }
-        title = event_titles.get(event.event_type, "Обновление")
-
+        icon = EVENT_ICONS.get(event.event_type, "📌")
+        title = EVENT_TITLES.get(event.event_type, "Обновление")
         lines = [
             f"{icon} {hbold(title)}",
             f"{hlink(event.issue_key, event.issue_url)}: {event.issue_summary}",
             f"От: {event.author}",
             f"{event.details}",
         ]
-
         return "\n".join(lines)
 
 
