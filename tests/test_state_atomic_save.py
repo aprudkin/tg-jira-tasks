@@ -9,9 +9,10 @@ import bot.services.notifications as nots
 
 @pytest.fixture
 def isolated_state(tmp_path, monkeypatch):
-    """Подменяет STATE_FILE на временный путь и возвращает его."""
+    """Подменяет settings.state_file на временный путь и возвращает его."""
+    from bot.config import settings
     state_file = tmp_path / "sync_state.json"
-    monkeypatch.setattr(nots, "STATE_FILE", state_file)
+    monkeypatch.setattr(settings, "state_file", state_file)
     return state_file
 
 

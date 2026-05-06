@@ -7,12 +7,15 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.utils.markdown import hbold, hlink
 
+from bot.config import settings
 from bot.services.jira import jira_service, JiraEvent, utc_now_naive, CLOSED_STATUSES
 
 logger = logging.getLogger(__name__)
 
-# Путь к файлу состояния (в Docker монтируется через volume)
-STATE_FILE = Path("/app/data/sync_state.json")
+# Путь к файлу состояния (в Docker монтируется через volume).
+# Используется через свойство, чтобы тесты могли подменять settings.state_file.
+def _state_file() -> Path:
+    return settings.state_file
 
 # Задержка между уведомлениями, чтобы не упереться в rate-limit Telegram
 SEND_DELAY_SECONDS = 0.5
@@ -55,8 +58,9 @@ class NotificationService:
     def _load_state(self) -> None:
         """Загружает состояние подписки из файла."""
         try:
-            if STATE_FILE.exists():
-                data = json.loads(STATE_FILE.read_text())
+            state_file = _state_file()
+            if state_file.exists():
+                data = json.loads(state_file.read_text())
                 self._chat_id = data.get("chat_id")
                 self._interval_minutes = data.get("interval_minutes", self.DEFAULT_INTERVAL_MINUTES)
                 # Загружаем ID уже отправленных событий
@@ -91,7 +95,8 @@ class NotificationService:
 
     def _save_state_sync(self) -> None:
         try:
-            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            state_file = _state_file()
+            state_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "chat_id": self._chat_id,
                 "interval_minutes": self._interval_minutes,
@@ -104,9 +109,9 @@ class NotificationService:
             # Пишем во временный файл и атомарно подменяем — иначе падение
             # бота посреди write_text оставит обрезанный JSON, а _load_state
             # молча сбросит дедуп и подписку.
-            tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+            tmp = state_file.with_suffix(state_file.suffix + ".tmp")
             tmp.write_text(json.dumps(data))
-            tmp.replace(STATE_FILE)
+            tmp.replace(state_file)
             logger.info("Subscription state saved")
         except Exception as e:
             logger.error(f"Error saving state: {e}")

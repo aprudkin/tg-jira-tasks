@@ -1,4 +1,6 @@
 import functools
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +18,9 @@ class Settings(BaseSettings):
     jira_api_token: str | None = None
     jira_pat: str | None = None
     allowed_users: str = ""
+    # Путь к файлу состояния подписки на уведомления.
+    # В Docker монтируется через volume, локально можно переопределить через env STATE_FILE.
+    state_file: Path = Path("/app/data/sync_state.json")
 
     @functools.cached_property
     def allowed_user_ids(self) -> list[int]:
