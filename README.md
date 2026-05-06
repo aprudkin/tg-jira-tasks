@@ -14,7 +14,7 @@ Telegram-бот для работы с Jira. Показывает задачи, 
 
 1. Клонируйте репозиторий:
 ```bash
-git clone git@gitlab.avosend.tech:ops-projects/win/bots/tg-jira-tasks.git
+git clone git@github.com:aprudkin/tg-jira-tasks.git
 cd tg-jira-tasks
 ```
 
