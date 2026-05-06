@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections import defaultdict
 
 from aiogram import Router
@@ -9,10 +10,15 @@ from aiogram.utils.markdown import hbold, hlink
 from bot.services.jira import jira_service, JiraTask
 from bot.services.notifications import notification_service
 
+logger = logging.getLogger(__name__)
+
 router = Router()
 
 # Интервал по умолчанию для уведомлений (в минутах)
 DEFAULT_NOTIFICATION_INTERVAL = 30
+
+# Сообщение пользователю при ошибке Jira (детали — только в логах с exc_info)
+JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 
 # Задержка перед удалением loading-сообщения (в секундах)
 LOADING_DELETE_DELAY = 5
@@ -96,8 +102,9 @@ async def cmd_inprog(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_my_tasks_in_progress()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -119,8 +126,9 @@ async def cmd_sprint(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_my_tasks_in_sprint()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -143,8 +151,9 @@ async def cmd_byme(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_tasks_created_by_me()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -166,8 +175,9 @@ async def cmd_todo(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_todo_tasks()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -189,8 +199,9 @@ async def cmd_waiting(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_waiting_tasks()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -212,8 +223,9 @@ async def cmd_recent(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_recent_tasks(hours=24)
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -236,8 +248,9 @@ async def cmd_watching(message: Message) -> None:
 
     try:
         tasks = await jira_service.get_watching_tasks()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -259,8 +272,9 @@ async def cmd_stats(message: Message) -> None:
 
     try:
         stats = await jira_service.get_stats()
-    except Exception as e:
-        await message.answer(f"Error connecting to Jira: {e}")
+    except Exception:
+        logger.exception("Jira call failed")
+        await message.answer(JIRA_ERROR_MESSAGE)
         return
     finally:
         schedule_delete(loading_msg)
@@ -354,8 +368,9 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
             if not target_user:
                 await message.answer("Could not determine your Jira username. Please specify it explicitly: /silent username")
                 return
-        except Exception as e:
-            await message.answer(f"Error fetching current user: {e}")
+        except Exception:
+            logger.exception("Failed to fetch current Jira user")
+            await message.answer("⚠️ Could not determine your Jira username.")
             return
 
     is_silent = notification_service.is_user_silent(target_user)
@@ -380,8 +395,9 @@ async def cmd_unsilent(message: Message, command: CommandObject) -> None:
             if not target_user:
                 await message.answer("Could not determine your Jira username. Please specify it explicitly: /unsilent username")
                 return
-        except Exception as e:
-            await message.answer(f"Error fetching current user: {e}")
+        except Exception:
+            logger.exception("Failed to fetch current Jira user")
+            await message.answer("⚠️ Could not determine your Jira username.")
             return
 
     if not notification_service.is_user_silent(target_user):

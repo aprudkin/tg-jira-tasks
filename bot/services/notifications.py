@@ -87,8 +87,8 @@ class NotificationService:
                 if self._chat_id is not None:
                     self._last_check = utc_now_naive()
                     logger.info(f"Restored subscription (chat_id={self._chat_id}, interval={self._interval_minutes} min)")
-        except Exception as e:
-            logger.error(f"Error loading state: {e}")
+        except Exception:
+            logger.exception("Error loading state")
 
     async def _save_state(self) -> None:
         """Сохраняет состояние подписки в файл."""
@@ -114,8 +114,8 @@ class NotificationService:
             tmp.write_text(json.dumps(data))
             tmp.replace(state_file)
             logger.info("Subscription state saved")
-        except Exception as e:
-            logger.error(f"Error saving state: {e}")
+        except Exception:
+            logger.exception("Error saving state")
 
     async def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
         """Подписывает на уведомления с указанным интервалом."""
@@ -210,8 +210,8 @@ class NotificationService:
                 await self._check_notifications()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error in notification loop: {e}")
+            except Exception:
+                logger.exception("Error in notification loop")
 
     async def _check_notifications(self) -> None:
         """Проверяет уведомления."""
@@ -251,8 +251,8 @@ class NotificationService:
             # Обновляем время последней проверки
             self._last_check = utc_now_naive()
 
-        except Exception as e:
-            logger.error(f"Error checking events: {e}")
+        except Exception:
+            logger.exception("Error checking events")
 
     async def _send_events(self, chat_id: int, events: list[JiraEvent]) -> None:
         """Отправляет уведомления о событиях пользователю."""
@@ -280,8 +280,8 @@ class NotificationService:
                     await asyncio.sleep(e.retry_after)
                     continue
                 logger.error(f"Rate-limited twice for chat {chat_id}, dropping event {event.id}")
-            except Exception as e:
-                logger.error(f"Error sending notification to {chat_id}: {e}")
+            except Exception:
+                logger.exception(f"Error sending notification to {chat_id}")
                 return
 
     def _format_event(self, event: JiraEvent) -> str:
