@@ -7,7 +7,7 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.utils.markdown import hbold, hlink
 
-from bot.services.jira import jira_service, JiraEvent, utc_now_naive
+from bot.services.jira import jira_service, JiraEvent, utc_now_naive, CLOSED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -212,13 +212,10 @@ class NotificationService:
                     for event in new_events:
                         self._processed_events[event.issue_key].add(event.id)
 
-                    # Очищаем состояние для закрытых задач
+                    # Очищаем состояние для задач, перешедших в закрытый статус
                     for event in new_events:
-                        if event.event_type == "status_change":
-                            # Если статус меняется на закрытый, удаляем историю для этой задачи
-                            if any(s in event.details for s in ("Done", "Closed", "Resolved")):
-                                if event.issue_key in self._processed_events:
-                                    del self._processed_events[event.issue_key]
+                        if event.event_type == "status_change" and event.to_status in CLOSED_STATUSES:
+                            self._processed_events.pop(event.issue_key, None)
 
                     # Сохраняем состояние (обновленный список ID)
                     await self._save_state()

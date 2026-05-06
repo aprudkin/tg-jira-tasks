@@ -16,6 +16,10 @@ def utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# Статусы, после перехода в которые история событий задачи может быть очищена
+CLOSED_STATUSES = frozenset({"Done", "Closed", "Resolved"})
+
+
 @dataclass
 class JiraTask:
     """Представление задачи Jira."""
@@ -51,6 +55,8 @@ class JiraEvent:
     details: str
     id: str  # Unique ID for deduplication
     timestamp: datetime = field(default_factory=utc_now_naive)
+    # Только для event_type="status_change": имя нового статуса (item.toString)
+    to_status: str | None = None
 
 
 @dataclass
@@ -281,7 +287,7 @@ class JiraService:
                 ))
 
             # Проверяем комментарии (только для открытых задач)
-            is_closed = issue.fields.status.name in ("Done", "Closed", "Resolved")
+            is_closed = issue.fields.status.name in CLOSED_STATUSES
             if hasattr(issue.fields, "comment") and issue.fields.comment and not is_closed:
                 for comment in issue.fields.comment.comments:
                     comment_created = self._parse_jira_datetime(comment.created)
@@ -330,6 +336,7 @@ class JiraService:
                                 author_id=author_name,
                                 details=f"{item.fromString} → {item.toString}",
                                 timestamp=history_created,
+                                to_status=item.toString,
                             ))
                         elif item.field == "assignee" and item.to == current_user:
                             # item.to содержит username/accountId, item.toString - displayName

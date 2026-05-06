@@ -1,7 +1,7 @@
 """Тесты для чистых утилит из bot.services.jira."""
 from datetime import datetime, timezone
 
-from bot.services.jira import utc_now_naive, JiraEvent
+from bot.services.jira import utc_now_naive, JiraEvent, CLOSED_STATUSES
 
 
 def test_utc_now_naive_returns_naive_utc():
@@ -27,6 +27,29 @@ def test_utc_now_naive_independent_of_local_tz(monkeypatch):
     finally:
         monkeypatch.delenv("TZ", raising=False)
         time.tzset()
+
+
+def test_closed_statuses_membership():
+    """Сanity check, чтобы случайно не сузили/расширили множество."""
+    assert "Done" in CLOSED_STATUSES
+    assert "Closed" in CLOSED_STATUSES
+    assert "Resolved" in CLOSED_STATUSES
+    # Reopen — НЕ закрытый, иначе дедуп ломается
+    assert "Reopened" not in CLOSED_STATUSES
+    assert "In Progress" not in CLOSED_STATUSES
+
+
+def test_status_change_to_status_carried_explicitly():
+    """to_status должен быть только у status_change событий и нести toString из Jira."""
+    ev = JiraEvent(
+        issue_key="X-1", issue_summary="s", issue_url="u",
+        event_type="status_change", author="a", author_id="ai",
+        details="Resolved → Reopened", id="sid",
+        to_status="Reopened",
+    )
+    assert ev.to_status == "Reopened"
+    # Раньше substring-проверка по details ловила "Resolved" — теперь нет.
+    assert ev.to_status not in CLOSED_STATUSES
 
 
 def test_jira_event_default_timestamp_is_utc_naive():
