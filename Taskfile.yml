@@ -22,6 +22,11 @@ tasks:
       - task: docker:up
       - echo "Bot stack is ready."
 
+  test:
+    desc: Run pytest (тесты для чистых утилит)
+    cmds:
+      - python3 -m pytest tests/ -v
+
   status:
     desc: Show status of the bot stack
     cmds:
