@@ -30,6 +30,8 @@ BOT_COMMANDS = [
     BotCommand(command="stats", description="Статистика"),
     BotCommand(command="sync", description="Включить уведомления"),
     BotCommand(command="unsync", description="Отключить уведомления"),
+    BotCommand(command="silent", description="Отключить звук от пользователя"),
+    BotCommand(command="unsilent", description="Включить звук от пользователя"),
 ]
 
 
