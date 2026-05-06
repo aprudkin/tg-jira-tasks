@@ -23,6 +23,10 @@ JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 # Текст loading-сообщения для большинства команд
 LOADING_TASKS = "Loading tasks..."
 
+# Лимит длины сообщения Telegram — 4096 UTF-16 code units. Берём с запасом
+# на накладные HTML-теги и эмодзи.
+TG_MESSAGE_CHUNK_SIZE = 4000
+
 # Задержка перед удалением loading-сообщения (в секундах)
 LOADING_DELETE_DELAY = 5
 
@@ -62,6 +66,40 @@ class _Failed:
 
 # Singleton, проверяется через `is _FAILED`
 _FAILED = _Failed()
+
+
+async def _answer_chunked(message: Message, text: str) -> None:
+    """Отправляет text, при необходимости бьёт на чанки по '\\n'.
+
+    Telegram ограничивает сообщение 4096 символами; при превышении aiogram
+    бросает TelegramBadRequest. Помогает командам с большим числом задач
+    (/sprint, /recent, /watching).
+    """
+    if len(text) <= TG_MESSAGE_CHUNK_SIZE:
+        await message.answer(text)
+        return
+
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        # Одна строка длиннее лимита — режем принудительно (edge case).
+        while len(line) > TG_MESSAGE_CHUNK_SIZE:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:TG_MESSAGE_CHUNK_SIZE])
+            line = line[TG_MESSAGE_CHUNK_SIZE:]
+        sep = "\n" if current else ""
+        if len(current) + len(sep) + len(line) <= TG_MESSAGE_CHUNK_SIZE:
+            current += sep + line
+        else:
+            chunks.append(current)
+            current = line
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await message.answer(chunk)
 
 
 async def _safe_fetch(message: Message, loading_text: str, fetch):
@@ -134,7 +172,7 @@ async def cmd_inprog(message: Message) -> None:
 
     lines = [hbold("My tasks in progress:"), ""]
     lines.extend(format_task(task) for task in tasks)
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, "\n".join(lines))
 
 
 @router.message(Command("sprint"))
@@ -147,7 +185,7 @@ async def cmd_sprint(message: Message) -> None:
         await message.answer("No tasks found in active sprint.")
         return
 
-    await message.answer(render_grouped_by_status(
+    await _answer_chunked(message, render_grouped_by_status(
         tasks,
         title="My sprint tasks:",
         status_order=["In Progress", "Discussion", "Hold", "Backlog", "Resolved"],
@@ -166,7 +204,7 @@ async def cmd_byme(message: Message) -> None:
 
     lines = [hbold("Tasks created by me (assigned to others):"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, "\n".join(lines))
 
 
 @router.message(Command("todo"))
@@ -181,7 +219,7 @@ async def cmd_todo(message: Message) -> None:
 
     lines = [hbold("My backlog tasks:"), ""]
     lines.extend(format_task(task) for task in tasks)
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, "\n".join(lines))
 
 
 @router.message(Command("waiting"))
@@ -196,7 +234,7 @@ async def cmd_waiting(message: Message) -> None:
 
     lines = [hbold("Tasks waiting for decision:"), ""]
     lines.extend(format_task(task, show_status=True) for task in tasks)
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, "\n".join(lines))
 
 
 @router.message(Command("recent"))
@@ -209,7 +247,7 @@ async def cmd_recent(message: Message) -> None:
         await message.answer("No tasks updated in the last 24 hours.")
         return
 
-    await message.answer(render_grouped_by_status(
+    await _answer_chunked(message, render_grouped_by_status(
         tasks,
         title="Tasks updated in last 24h:",
         status_order=["In Progress", "Reopened", "Discussion", "On Hold", "Resolved", "Closed"],
@@ -228,7 +266,7 @@ async def cmd_watching(message: Message) -> None:
 
     lines = [hbold("Tasks I'm watching:"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, "\n".join(lines))
 
 
 @router.message(Command("stats"))
@@ -246,7 +284,7 @@ async def cmd_stats(message: Message) -> None:
         f"✅ Resolved this week: {stats.resolved_this_week}",
         f"📌 Total open: {stats.total_assigned}",
     ]
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, "\n".join(lines))
 
 
 @router.message(Command("sync"))
