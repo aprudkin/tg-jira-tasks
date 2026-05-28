@@ -199,18 +199,15 @@ class NotificationService:
 
     async def _check_loop(self) -> None:
         """Цикл проверки уведомлений с защитой от неожиданной отмены."""
-        first_check = True
+        sleep_secs = 5  # первая проверка через 5 секунд после старта
         last_heartbeat: float = 0.0
         while True:
             try:
-                if first_check:
-                    await asyncio.sleep(5)
-                    first_check = False
-                else:
-                    await asyncio.sleep(self._interval_minutes * 60)
+                await asyncio.sleep(sleep_secs)
+                sleep_secs = self._interval_minutes * 60
 
                 # Heartbeat раз в час — видно что цикл жив, даже если событий нет
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 if now - last_heartbeat >= 3600:
                     logger.info("Notification loop alive (chat_id=%s, interval=%dm)",
                                 self._chat_id, self._interval_minutes)
@@ -223,7 +220,7 @@ class NotificationService:
                 # Неожиданная внешняя отмена — подавляем и перезапускаем цикл
                 asyncio.current_task().uncancel()
                 logger.warning("Notification loop cancelled unexpectedly, restarting")
-                first_check = True
+                sleep_secs = 5
             except Exception:
                 logger.exception("Error in notification loop")
 

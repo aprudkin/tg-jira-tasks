@@ -90,18 +90,12 @@ class JiraService:
             return self._client
         with self._client_lock:
             if self._client is None:
-                if settings.jira_pat:
-                    self._client = JIRA(
-                        server=settings.jira_url,
-                        token_auth=settings.jira_pat,
-                        timeout=30,
-                    )
-                else:
-                    self._client = JIRA(
-                        server=settings.jira_url,
-                        basic_auth=(settings.jira_email, settings.jira_api_token),
-                        timeout=30,
-                    )
+                auth = (
+                    {"token_auth": settings.jira_pat}
+                    if settings.jira_pat
+                    else {"basic_auth": (settings.jira_email, settings.jira_api_token)}
+                )
+                self._client = JIRA(server=settings.jira_url, timeout=30, **auth)
             return self._client
 
     async def get_my_tasks_in_progress(self) -> list[JiraTask]:
