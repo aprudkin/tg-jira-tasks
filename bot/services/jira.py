@@ -94,11 +94,13 @@ class JiraService:
                     self._client = JIRA(
                         server=settings.jira_url,
                         token_auth=settings.jira_pat,
+                        timeout=30,
                     )
                 else:
                     self._client = JIRA(
                         server=settings.jira_url,
                         basic_auth=(settings.jira_email, settings.jira_api_token),
+                        timeout=30,
                     )
             return self._client
 

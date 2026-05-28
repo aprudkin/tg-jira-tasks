@@ -53,6 +53,8 @@ class NotificationService:
         self._processed_events: dict[str, set[str]] = {}
         # Множество пользователей, от которых уведомления приходят без звука
         self._silent_users: set[str] = set()
+        # Флаг намеренной остановки — отличает stop() от внешней отмены задачи
+        self._stopping: bool = False
         # Загружаем сохранённое состояние при инициализации
         self._load_state()
 
@@ -186,6 +188,7 @@ class NotificationService:
 
     async def stop(self) -> None:
         """Останавливает фоновую задачу и ожидает её завершения."""
+        self._stopping = True
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -195,21 +198,32 @@ class NotificationService:
             logger.info("Notification service stopped")
 
     async def _check_loop(self) -> None:
-        """Цикл проверки уведомлений."""
-        # Первая проверка выполняется сразу после подписки
+        """Цикл проверки уведомлений с защитой от неожиданной отмены."""
         first_check = True
+        last_heartbeat: float = 0.0
         while True:
             try:
                 if first_check:
-                    # Небольшая задержка для завершения инициализации
                     await asyncio.sleep(5)
                     first_check = False
                 else:
-                    # Ждём интервал в секундах
                     await asyncio.sleep(self._interval_minutes * 60)
+
+                # Heartbeat раз в час — видно что цикл жив, даже если событий нет
+                now = asyncio.get_event_loop().time()
+                if now - last_heartbeat >= 3600:
+                    logger.info("Notification loop alive (chat_id=%s, interval=%dm)",
+                                self._chat_id, self._interval_minutes)
+                    last_heartbeat = now
+
                 await self._check_notifications()
             except asyncio.CancelledError:
-                break
+                if self._stopping:
+                    break
+                # Неожиданная внешняя отмена — подавляем и перезапускаем цикл
+                asyncio.current_task().uncancel()
+                logger.warning("Notification loop cancelled unexpectedly, restarting")
+                first_check = True
             except Exception:
                 logger.exception("Error in notification loop")
 
