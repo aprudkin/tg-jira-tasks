@@ -3,6 +3,25 @@ version: '3'
 vars:
   REPO_ROOT:
     sh: git rev-parse --show-toplevel
+  # --- Прод-деплой (App Server sf-bot-app01, см. DEPLOY.md) ---
+  DEPLOY_SSH: "ssh -i ~/.ssh/luk -o StrictHostKeyChecking=accept-new"
+  DEPLOY_SERVER: "root@143.110.233.82"
+  DEPLOY_REMOTE: "/root/tg-jira-tasks"
+  # Исключения синхронизации. ВНИМАНИЕ: --delete + исключён только .env →
+  # серверные бэкапы (.env.bak*, *.bak) будут удалены (живой .env сохраняется).
+  DEPLOY_FILTER: >-
+    --exclude .git/
+    --exclude .venv/
+    --exclude __pycache__/
+    --exclude .claude/
+    --exclude .osgrep/
+    --exclude .mcp.json
+    --exclude .DS_Store
+    --exclude CLAUDE.md
+    --exclude ANTIGRAVITY.md
+    --exclude tasks/
+    --exclude .env
+    --exclude "*.pyc"
 
 includes:
   docker:
@@ -41,3 +60,34 @@ tasks:
       - echo ""
       - echo "=== 📦 Образы ==="
       - docker compose images --format table
+
+  deploy:
+    desc: "Deploy bot to PROD (rsync → verify → rebuild → check logs). Touches 143.110.233.82."
+    dir: "{{.REPO_ROOT}}"
+    prompt: "Deploy to PROD (sf-bot-app01 / 143.110.233.82)?"
+    cmds:
+      - |
+        set -euo pipefail
+        echo "📤 rsync → {{.DEPLOY_SERVER}}:{{.DEPLOY_REMOTE}}"
+        rsync -avz --delete {{.DEPLOY_FILTER}} -e "{{.DEPLOY_SSH}}" ./ "{{.DEPLOY_SERVER}}:{{.DEPLOY_REMOTE}}/"
+        # Проверяем, что код долетел, ДО пересборки (грейт rsync в foreground + set -e).
+        # НЕ гейтим на grep -c (он выходит !=0 при 0 совпадений) — используем test -f.
+        echo "🔎 verify code landed"
+        {{.DEPLOY_SSH}} {{.DEPLOY_SERVER}} "test -f {{.DEPLOY_REMOTE}}/bot/main.py && test -f {{.DEPLOY_REMOTE}}/docker-compose.yml"
+        echo "🐳 rebuild + restart"
+        {{.DEPLOY_SSH}} {{.DEPLOY_SERVER}} "cd {{.DEPLOY_REMOTE}} && docker compose up -d --build"
+        echo "⏳ startup logs (server-side sleep):"
+        {{.DEPLOY_SSH}} {{.DEPLOY_SERVER}} "sleep 12 && docker logs --tail=20 tg-jira-bot 2>&1"
+        echo "✅ confirm 'Run polling for bot' appears above"
+    interactive: true
+    silent: true
+
+  deploy:dry:
+    desc: "Dry-run: показать, что deploy засинкал бы (без пересборки)."
+    dir: "{{.REPO_ROOT}}"
+    cmds:
+      - |
+        set -euo pipefail
+        rsync -avz --delete --dry-run {{.DEPLOY_FILTER}} -e "{{.DEPLOY_SSH}}" ./ "{{.DEPLOY_SERVER}}:{{.DEPLOY_REMOTE}}/"
+    interactive: true
+    silent: true
