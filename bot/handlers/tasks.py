@@ -8,6 +8,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.utils.markdown import hbold, hlink
 
+from bot import status
 from bot.services.jira import jira_service, JiraTask
 from bot.services.notifications import notification_service, PERSONAL
 
@@ -157,22 +158,22 @@ async def _safe_fetch(message: Message, loading_text: str, fetch):
         schedule_delete(loading_msg)
 
 
-def render_grouped_by_status(
-    tasks: list[JiraTask], title: str, status_order: list[str]
-) -> str:
-    """Группирует задачи по статусу в заданном порядке и форматирует ответ."""
+def render_grouped_by_status(tasks: list[JiraTask], title: str) -> str:
+    """Группирует задачи по статусу в каноническом порядке (status.ORDER) и форматирует ответ.
+
+    Неизвестные статусы идут последними (по алфавиту — для детерминизма вывода).
+    """
     by_status: dict[str, list[JiraTask]] = defaultdict(list)
     for task in tasks:
         by_status[task.status].append(task)
 
-    # Сначала статусы из явного порядка, затем все остальные
-    statuses = [s for s in status_order if s in by_status]
-    statuses.extend(s for s in by_status if s not in status_order)
+    rank = {name: i for i, name in enumerate(status.ORDER)}
+    ordered = sorted(by_status, key=lambda s: (rank.get(s, len(status.ORDER)), s))
 
     lines = [hbold(title), ""]
-    for status in statuses:
-        lines.append(f"\n{hbold(status)}:")
-        lines.extend(format_task(task) for task in by_status[status])
+    for name in ordered:
+        lines.append(f"\n{hbold(name)}:")
+        lines.extend(format_task(task) for task in by_status[name])
     return "\n".join(lines)
 
 
@@ -227,11 +228,7 @@ async def cmd_sprint(message: Message) -> None:
         await message.answer("No tasks found in active sprint.")
         return
 
-    await _answer_chunked(message, render_grouped_by_status(
-        tasks,
-        title="My sprint tasks:",
-        status_order=["In Progress", "Discussion", "Hold", "Backlog", "Resolved"],
-    ))
+    await _answer_chunked(message, render_grouped_by_status(tasks, title="My sprint tasks:"))
 
 
 @router.message(Command("byme"))
@@ -289,11 +286,7 @@ async def cmd_recent(message: Message) -> None:
         await message.answer("No tasks updated in the last 24 hours.")
         return
 
-    await _answer_chunked(message, render_grouped_by_status(
-        tasks,
-        title="Tasks updated in last 24h:",
-        status_order=["In Progress", "Reopened", "Discussion", "On Hold", "Resolved", "Closed"],
-    ))
+    await _answer_chunked(message, render_grouped_by_status(tasks, title="Tasks updated in last 24h:"))
 
 
 @router.message(Command("watching"))

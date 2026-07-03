@@ -14,14 +14,25 @@ def test_render_grouped_orders_known_statuses_first():
         _task("A-3", "Custom"),
         _task("A-4", "In Progress"),
     ]
-    out = render_grouped_by_status(
-        tasks, "Title:", status_order=["In Progress", "Backlog"]
-    )
+    out = render_grouped_by_status(tasks, "Title:")
 
     pos_in_progress = out.index("In Progress")
     pos_backlog = out.index("Backlog")
     pos_custom = out.index("Custom")
+    # Порядок канонический (status.ORDER); неизвестный статус — последним
     assert pos_in_progress < pos_backlog < pos_custom
+
+
+def test_render_grouped_on_hold_sorts_above_resolved():
+    """Регрессия: /sprint раньше передавал status_order с опечаткой 'Hold',
+    и реальный статус 'On Hold' падал в конец. Теперь порядок канонический."""
+    tasks = [
+        _task("A-1", "Resolved"),
+        _task("A-2", "On Hold"),
+        _task("A-3", "In Progress"),
+    ]
+    out = render_grouped_by_status(tasks, "Sprint:")
+    assert out.index("In Progress") < out.index("On Hold") < out.index("Resolved")
 
 
 def test_render_grouped_includes_all_tasks():
@@ -30,13 +41,13 @@ def test_render_grouped_includes_all_tasks():
         _task("A-2", "Done"),
         _task("A-3", "Other"),
     ]
-    out = render_grouped_by_status(tasks, "T:", status_order=["Done"])
+    out = render_grouped_by_status(tasks, "T:")
     for key in ("A-1", "A-2", "A-3"):
         assert key in out
 
 
 def test_render_grouped_empty_input_renders_only_title():
-    out = render_grouped_by_status([], "Title:", status_order=["X"])
+    out = render_grouped_by_status([], "Title:")
     # Без задач не должно быть ни одной ссылки на задачу
     assert "browse/" not in out
     assert "Title" in out

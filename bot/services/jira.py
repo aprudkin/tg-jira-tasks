@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from jira import JIRA
 
+from bot import status
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
@@ -16,8 +17,11 @@ def utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-# Статусы, после перехода в которые история событий задачи может быть очищена
-CLOSED_STATUSES = frozenset({"Done", "Closed", "Resolved"})
+def _jql_in(field: str, statuses: tuple[str, ...], negate: bool = False) -> str:
+    """Собирает JQL-условие вида `field in ("a", "b")` из кортежа статусов (status.*)."""
+    values = ", ".join(f'"{s}"' for s in statuses)
+    op = "not in" if negate else "in"
+    return f"{field} {op} ({values})"
 
 
 @dataclass
@@ -103,7 +107,7 @@ class JiraService:
         return await asyncio.to_thread(self._get_my_tasks_in_progress_sync)
 
     def _get_my_tasks_in_progress_sync(self) -> list[JiraTask]:
-        jql = 'assignee = currentUser() AND status = "In Progress"'
+        jql = f'assignee = currentUser() AND status = "{status.IN_PROGRESS}"'
         return self._search_issues(jql)
 
     async def get_my_tasks_in_sprint(self) -> list[JiraTask]:
@@ -142,7 +146,7 @@ class JiraService:
 
     def _get_todo_tasks_sync(self) -> list[JiraTask]:
         jql = (
-            'assignee = currentUser() AND status in ("To Do", "Backlog", "Open") '
+            f'assignee = currentUser() AND {_jql_in("status", status.BACKLOG_GROUP)} '
             'AND resolution = Unresolved ORDER BY priority DESC, created ASC'
         )
         return self._search_issues(jql)
@@ -153,7 +157,7 @@ class JiraService:
 
     def _get_waiting_tasks_sync(self) -> list[JiraTask]:
         jql = (
-            'assignee = currentUser() AND status in ("Discussion", "On Hold") '
+            f'assignee = currentUser() AND {_jql_in("status", status.WAITING_GROUP)} '
             'AND resolution = Unresolved ORDER BY updated DESC'
         )
         return self._search_issues(jql)
@@ -166,7 +170,7 @@ class JiraService:
         jql = (
             'watcher = currentUser() AND assignee != currentUser() '
             'AND resolution = Unresolved '
-            'AND status not in (Done, Closed, Resolved) '
+            f'AND {_jql_in("status", status.CLOSED_GROUP, negate=True)} '
             'ORDER BY updated DESC'
         )
         return self._search_issues(jql, include_assignee=True)
@@ -174,8 +178,8 @@ class JiraService:
     async def get_stats(self) -> JiraStats:
         """Получает статистику по задачам параллельно."""
         jqls = (
-            'assignee = currentUser() AND status = "In Progress"',
-            'assignee = currentUser() AND status in ("To Do", "Backlog", "Open") '
+            f'assignee = currentUser() AND status = "{status.IN_PROGRESS}"',
+            f'assignee = currentUser() AND {_jql_in("status", status.BACKLOG_GROUP)} '
             'AND resolution = Unresolved',
             'assignee = currentUser() AND resolved >= startOfWeek()',
             'assignee = currentUser() AND resolution = Unresolved',
@@ -295,7 +299,7 @@ class JiraService:
                 ))
 
             # Проверяем комментарии (только для открытых задач)
-            is_closed = issue.fields.status.name in CLOSED_STATUSES
+            is_closed = issue.fields.status.name in status.CLOSED_GROUP
             if hasattr(issue.fields, "comment") and issue.fields.comment and not is_closed:
                 for comment in issue.fields.comment.comments:
                     comment_created = self._parse_jira_datetime(comment.created)

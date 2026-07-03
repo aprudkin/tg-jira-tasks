@@ -39,3 +39,19 @@ _Avoid_: Notification (an event is the source; the notification is its rendered 
 **Muted author**:
 A Jira identity whose authored events are delivered to the subscribed chat silently (no Telegram sound). Cross-cutting: applied across every sync channel and matched by the event's author, independent of which channel surfaced the event.
 _Avoid_: Silent user, muted user (both overload "user" — this concerns the event's author, not the tracked user)
+
+**Status**:
+A Jira workflow state of an issue (`In Progress`, `On Hold`, `Resolved`, …). The canonical status names, their display order, and the semantic groups below live in one owner; every query and every grouping refers to it, so a status name never appears twice.
+_Avoid_: State, stage
+
+**Backlog group**:
+The statuses that mean *not started* — `To Do`, `Backlog`, `Open`. Queried together as one bucket.
+_Avoid_: Todo, unstarted
+
+**Waiting group**:
+The statuses that mean *blocked on a decision* — `Discussion`, `On Hold`. Queried and displayed together.
+_Avoid_: Blocked, paused, hold
+
+**Closed group**:
+The statuses that mean *finished* — `Done`, `Closed`, `Resolved`. Reaching one lets a sync channel clear that issue's event-dedup history.
+_Avoid_: naming it after a single member (Done / Closed / Resolved)

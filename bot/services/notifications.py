@@ -10,7 +10,8 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.utils.markdown import hbold, hlink
 
 from bot.config import settings
-from bot.services.jira import jira_service, JiraEvent, utc_now_naive, CLOSED_STATUSES
+from bot.services.jira import jira_service, JiraEvent, utc_now_naive
+from bot.status import CLOSED_GROUP
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +405,7 @@ class NotificationService:
 
                     # Очищаем историю задач, перешедших в закрытый статус
                     for event in new_events:
-                        if event.event_type == "status_change" and event.to_status in CLOSED_STATUSES:
+                        if event.event_type == "status_change" and event.to_status in CLOSED_GROUP:
                             channel.processed_events.pop(event.issue_key, None)
 
                     await self._save_state()
