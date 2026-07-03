@@ -15,11 +15,6 @@ from bot.status import CLOSED_GROUP
 
 logger = logging.getLogger(__name__)
 
-# Путь к файлу состояния (в Docker монтируется через volume).
-# Используется через свойство, чтобы тесты могли подменять settings.state_file.
-def _state_file() -> Path:
-    return settings.state_file
-
 # Задержка между уведомлениями, чтобы не упереться в rate-limit Telegram
 SEND_DELAY_SECONDS = 0.5
 
@@ -77,7 +72,17 @@ class NotificationService:
     # Интервал проверки по умолчанию в минутах
     DEFAULT_INTERVAL_MINUTES = 30
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        jira=jira_service,
+        state_file: Path | None = None,
+        first_check_delay: float = FIRST_CHECK_DELAY_SECONDS,
+    ) -> None:
+        # Коллаборанты принимаются, а не создаются — так интерфейс становится тестовой
+        # поверхностью (в тестах подставляются фейки без monkeypatch глобалов).
+        self._jira = jira  # источник событий Jira (нужен только get_events_since)
+        self._state_file = state_file  # None → путь берём из settings динамически
+        self._first_check_delay = first_check_delay  # задержка первой проверки канала
         self._chat_id: int | None = None
         # Каналы слежения: {user: Channel}; личный канал под ключом PERSONAL
         self._channels: dict[str, Channel] = {}
@@ -95,10 +100,14 @@ class NotificationService:
 
     # ---- Состояние -------------------------------------------------------
 
+    def _state_path(self) -> Path:
+        """Путь к файлу состояния: инъекция из конструктора или settings по умолчанию."""
+        return self._state_file if self._state_file is not None else settings.state_file
+
     def _load_state(self) -> None:
         """Загружает состояние из файла (новая схема или миграция плоской старой)."""
         try:
-            state_file = _state_file()
+            state_file = self._state_path()
             if not state_file.exists():
                 return
             data = json.loads(state_file.read_text())
@@ -155,7 +164,7 @@ class NotificationService:
     def _write_state(self, payload: str) -> None:
         """Атомарно пишет уже сериализованную строку (может выполняться в to_thread)."""
         try:
-            state_file = _state_file()
+            state_file = self._state_path()
             state_file.parent.mkdir(parents=True, exist_ok=True)
             # Пишем во временный файл и атомарно подменяем — иначе падение бота посреди
             # write_text оставит обрезанный JSON, а _load_state молча сбросит подписку.
@@ -357,7 +366,7 @@ class NotificationService:
 
     async def _channel_loop(self, channel: Channel) -> None:
         """Цикл проверки одного канала с защитой от неожиданной отмены."""
-        sleep_secs = FIRST_CHECK_DELAY_SECONDS  # первая проверка через 5 секунд после старта
+        sleep_secs = self._first_check_delay  # первая проверка вскоре после старта (не ждём полный интервал)
         last_heartbeat: float = 0.0
         while True:
             try:
@@ -376,7 +385,7 @@ class NotificationService:
                 # Неожиданная внешняя отмена — подавляем и перезапускаем цикл
                 asyncio.current_task().uncancel()
                 logger.warning("Channel %s loop cancelled unexpectedly, restarting", channel.user)
-                sleep_secs = FIRST_CHECK_DELAY_SECONDS
+                sleep_secs = self._first_check_delay
             except Exception:
                 logger.exception("Error in channel %s loop", channel.user)
 
@@ -388,7 +397,7 @@ class NotificationService:
             return
 
         try:
-            events = await jira_service.get_events_since(channel.last_check, channel.jira_target)
+            events = await self._jira.get_events_since(channel.last_check, channel.jira_target)
 
             if events:
                 new_events = []

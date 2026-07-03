@@ -9,16 +9,9 @@ from bot.services.jira import JiraEvent
 
 
 @pytest.fixture
-def isolated_state(tmp_path, monkeypatch):
-    from bot.config import settings
-    monkeypatch.setattr(settings, "state_file", tmp_path / "sync_state.json")
-    return tmp_path
-
-
-@pytest.fixture
-def svc(isolated_state):
+def svc(state_path, fake_jira):
     """Сервис с привязанным чатом, без бота (фоновые задачи не поднимаются)."""
-    s = nots.NotificationService()
+    s = nots.NotificationService(jira=fake_jira, state_file=state_path)
     s._chat_id = 100
     return s
 
@@ -99,8 +92,8 @@ async def test_list_channels_personal_first(svc):
 # ---- Шов №1: дедуп на канал → 2 уведомления на общем тикете (ADR-0002) ----
 
 @pytest.mark.asyncio
-async def test_shared_issue_notifies_each_channel_independently(isolated_state, monkeypatch):
-    s = nots.NotificationService()
+async def test_shared_issue_notifies_each_channel_independently(state_path, fake_jira):
+    s = nots.NotificationService(jira=fake_jira, state_file=state_path)
     s._bot = AsyncMock()
     s._chat_id = 100
     now = datetime(2026, 1, 1, 12, 0, 0)
@@ -108,11 +101,7 @@ async def test_shared_issue_notifies_each_channel_independently(isolated_state, 
     s._channels["jdoe"] = nots.Channel(user="jdoe", interval_minutes=15, emoji="🔵", last_check=now)
 
     # Один и тот же комментарий на общем тикете виден обоим каналам
-    evt = _evt("ABC-1", "comment_1")
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=[evt]),
-    )
+    fake_jira.get_events_since.return_value = [_evt("ABC-1", "comment_1")]
 
     await s.check_now(nots.PERSONAL)
     await s.check_now("jdoe")

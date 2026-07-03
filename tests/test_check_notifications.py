@@ -1,6 +1,6 @@
 """Mock-based тесты проверки канала (NotificationService._check_channel via check_now).
 
-Подмена jira_service.get_events_since и Bot.send_message — вся логика дедупликации
+Jira-источник и Bot.send_message инъектируются как фейки — вся логика дедупликации
 (на канал), очистки при close и обновления last_check проверяется без сети.
 """
 from datetime import datetime
@@ -13,17 +13,9 @@ from bot.services.jira import JiraEvent
 
 
 @pytest.fixture
-def isolated_state(tmp_path, monkeypatch):
-    """Свежий NotificationService с изолированным state_file."""
-    from bot.config import settings
-    monkeypatch.setattr(settings, "state_file", tmp_path / "sync_state.json")
-    return tmp_path
-
-
-@pytest.fixture
-def svc(isolated_state):
-    """NotificationService с подписанным личным каналом и mock-ботом."""
-    s = nots.NotificationService()
+def svc(state_path, fake_jira):
+    """NotificationService с инъектированными Jira/state, подписанным личным каналом и mock-ботом."""
+    s = nots.NotificationService(jira=fake_jira, state_file=state_path)
     s._bot = AsyncMock()
     s._chat_id = 555
     s._channels[nots.PERSONAL] = nots.Channel(
@@ -53,12 +45,8 @@ def _evt(issue_key: str, event_id: str, event_type: str = "comment", to_status: 
 
 
 @pytest.mark.asyncio
-async def test_first_check_sends_all_events(svc, monkeypatch):
-    events = [_evt("X-1", "c1"), _evt("X-1", "c2")]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
+async def test_first_check_sends_all_events(svc, fake_jira):
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1"), _evt("X-1", "c2")]
 
     await svc.check_now()
 
@@ -67,13 +55,9 @@ async def test_first_check_sends_all_events(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dedup_skips_already_processed(svc, monkeypatch):
+async def test_dedup_skips_already_processed(svc, fake_jira):
     _me(svc).processed_events["X-1"] = {"c1"}
-    events = [_evt("X-1", "c1"), _evt("X-1", "c2")]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1"), _evt("X-1", "c2")]
 
     await svc.check_now()
 
@@ -82,15 +66,11 @@ async def test_dedup_skips_already_processed(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_close_status_clears_dedup_history(svc, monkeypatch):
-    events = [
+async def test_close_status_clears_dedup_history(svc, fake_jira):
+    fake_jira.get_events_since.return_value = [
         _evt("X-1", "c1"),
         _evt("X-1", "s1", event_type="status_change", to_status="Done"),
     ]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
 
     await svc.check_now()
 
@@ -99,16 +79,12 @@ async def test_close_status_clears_dedup_history(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reopen_does_not_clear_dedup_history(svc, monkeypatch):
+async def test_reopen_does_not_clear_dedup_history(svc, fake_jira):
     """Регрессия: substring-проверка раньше ловила Resolved → Reopened."""
-    events = [
+    fake_jira.get_events_since.return_value = [
         _evt("X-1", "c1"),
         _evt("X-1", "s1", event_type="status_change", to_status="Reopened"),
     ]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
 
     await svc.check_now()
 
@@ -117,12 +93,9 @@ async def test_reopen_does_not_clear_dedup_history(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_last_check_advances_even_when_no_events(svc, monkeypatch):
+async def test_last_check_advances_even_when_no_events(svc, fake_jira):
     initial = _me(svc).last_check
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=[]),
-    )
+    fake_jira.get_events_since.return_value = []
 
     await svc.check_now()
 
@@ -132,22 +105,17 @@ async def test_last_check_advances_even_when_no_events(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_check_skipped_without_subscription(svc, monkeypatch):
+async def test_check_skipped_without_subscription(svc, fake_jira):
     svc._chat_id = None
-    mock_get = AsyncMock(return_value=[])
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        mock_get,
-    )
 
     await svc.check_now()
 
-    mock_get.assert_not_awaited()
+    fake_jira.get_events_since.assert_not_awaited()
     svc._bot.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_telegram_rate_limit_triggers_retry(svc, monkeypatch):
+async def test_telegram_rate_limit_triggers_retry(svc, fake_jira, monkeypatch):
     """При TelegramRetryAfter ждём retry_after секунд и повторяем send_message."""
     from aiogram.exceptions import TelegramRetryAfter
     from aiogram.methods import SendMessage
@@ -168,11 +136,7 @@ async def test_telegram_rate_limit_triggers_retry(svc, monkeypatch):
             raise TelegramRetryAfter(method=SendMessage(chat_id=0, text=""), message="slow", retry_after=7)
     svc._bot.send_message = AsyncMock(side_effect=flaky_send)
 
-    events = [_evt("X-1", "c1")]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1")]
 
     await svc.check_now()
 
@@ -182,7 +146,7 @@ async def test_telegram_rate_limit_triggers_retry(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_telegram_rate_limit_gives_up_after_one_retry(svc, monkeypatch):
+async def test_telegram_rate_limit_gives_up_after_one_retry(svc, fake_jira, monkeypatch):
     """После двух подряд 429 событие дропается, чтобы не висеть."""
     from aiogram.exceptions import TelegramRetryAfter
     from aiogram.methods import SendMessage
@@ -196,11 +160,7 @@ async def test_telegram_rate_limit_gives_up_after_one_retry(svc, monkeypatch):
         raise TelegramRetryAfter(method=SendMessage(chat_id=0, text=""), message="slow", retry_after=1)
     svc._bot.send_message = AsyncMock(side_effect=always_429)
 
-    events = [_evt("X-1", "c1")]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1")]
 
     await svc.check_now()
 
@@ -209,13 +169,9 @@ async def test_telegram_rate_limit_gives_up_after_one_retry(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_silent_user_disables_notification_sound(svc, monkeypatch):
+async def test_silent_user_disables_notification_sound(svc, fake_jira):
     svc._silent_users = {"bob"}
-    events = [_evt("X-1", "c1")]
-    monkeypatch.setattr(
-        "bot.services.notifications.jira_service.get_events_since",
-        AsyncMock(return_value=events),
-    )
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1")]
 
     await svc.check_now()
 
