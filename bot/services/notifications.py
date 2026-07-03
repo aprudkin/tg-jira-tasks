@@ -87,6 +87,8 @@ class NotificationService:
         self._stopping: bool = False
         # Фоновые задачи по каналам: {user: Task}
         self._tasks: dict[str, asyncio.Task] = {}
+        # Сериализует конкурентные сохранения от разных каналов (общий tmp-файл)
+        self._save_lock = asyncio.Lock()
         # Загружаем сохранённое состояние при инициализации
         self._load_state()
 
@@ -131,34 +133,58 @@ class NotificationService:
         except Exception:
             logger.exception("Error loading state")
 
-    async def _save_state(self) -> None:
-        await asyncio.to_thread(self._save_state_sync)
+    def _serialize_state(self) -> str:
+        """Строит JSON-строку состояния. Вызывается в event-loop потоке (без await),
+        поэтому dict'ы каналов не мутируются конкурентно — снапшот атомарен."""
+        data = {
+            "chat_id": self._chat_id,
+            "channels": {
+                user: {
+                    "interval_minutes": ch.interval_minutes,
+                    "emoji": ch.emoji,
+                    # Преобразуем сеты в списки, ограничивая историю дедупа
+                    "processed_events": {k: list(v)[-50:] for k, v in ch.processed_events.items()},
+                }
+                for user, ch in self._channels.items()
+            },
+            "silent_users": list(self._silent_users),
+        }
+        return json.dumps(data)
 
-    def _save_state_sync(self) -> None:
+    def _write_state(self, payload: str) -> None:
+        """Атомарно пишет уже сериализованную строку (может выполняться в to_thread)."""
         try:
             state_file = _state_file()
             state_file.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                "chat_id": self._chat_id,
-                "channels": {
-                    user: {
-                        "interval_minutes": ch.interval_minutes,
-                        "emoji": ch.emoji,
-                        # Преобразуем сеты в списки, ограничивая историю дедупа
-                        "processed_events": {k: list(v)[-50:] for k, v in ch.processed_events.items()},
-                    }
-                    for user, ch in self._channels.items()
-                },
-                "silent_users": list(self._silent_users),
-            }
             # Пишем во временный файл и атомарно подменяем — иначе падение бота посреди
             # write_text оставит обрезанный JSON, а _load_state молча сбросит подписку.
             tmp = state_file.with_suffix(state_file.suffix + ".tmp")
-            tmp.write_text(json.dumps(data))
+            tmp.write_text(payload)
             tmp.replace(state_file)
             logger.info("Subscription state saved")
         except Exception:
             logger.exception("Error saving state")
+
+    def _save_state_sync(self) -> None:
+        """Синхронное сохранение (тесты / прямые вызовы)."""
+        try:
+            payload = self._serialize_state()
+        except Exception:
+            logger.exception("Error serializing state")
+            return
+        self._write_state(payload)
+
+    async def _save_state(self) -> None:
+        """Concurrency-safe сохранение: снапшот строится в event-loop потоке, запись —
+        под asyncio.Lock, чтобы конкурентные сохранения от разных каналов не гонялись
+        за общий tmp-файл (иначе битый JSON → потеря подписки при загрузке)."""
+        try:
+            payload = self._serialize_state()
+        except Exception:
+            logger.exception("Error serializing state")
+            return
+        async with self._save_lock:
+            await asyncio.to_thread(self._write_state, payload)
 
     # ---- Привязка чата и каналы ------------------------------------------
 
