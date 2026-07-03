@@ -194,6 +194,13 @@ class JiraService:
         """Возвращает количество задач, соответствующих JQL."""
         return self.client.search_issues(jql, maxResults=0).total
 
+    async def count_assigned(self, user: str) -> int:
+        """Число задач, назначенных на user — проба видимости для /track.
+
+        Бросает исключение, если Jira не может прочитать (нет прав / нет такого юзера).
+        """
+        return await asyncio.to_thread(self._count_issues, f'assignee = "{user}"')
+
     def _search_issues(self, jql: str, include_assignee: bool = False) -> list[JiraTask]:
         """Выполняет поиск задач и возвращает список объектов JiraTask."""
         fields = ["key", "summary", "status"]
@@ -221,33 +228,38 @@ class JiraService:
         """Возвращает имя текущего пользователя Jira."""
         return await asyncio.to_thread(self.client.current_user)
 
-    async def get_events_since(self, since: datetime) -> list[JiraEvent]:
-        """Получает события по задачам пользователя с указанного времени (асинхронно)."""
-        return await asyncio.to_thread(self._get_events_since_sync, since)
+    async def get_events_since(self, since: datetime, target: str | None = None) -> list[JiraEvent]:
+        """Получает события по задачам целевого юзера с указанного времени (асинхронно).
 
-    def _get_events_since_sync(self, since: datetime) -> list[JiraEvent]:
-        """Получает события по задачам пользователя с указанного времени.
+        target=None → личный канал (currentUser); иначе — канал коллеги (assignee=target).
+        """
+        return await asyncio.to_thread(self._get_events_since_sync, since, target)
 
-        Отслеживает:
-        - Создание новых задач (назначенных на меня)
-        - Новые комментарии
-        - Изменения статуса
-        - Новые назначения на меня
+    def _get_events_since_sync(self, since: datetime, target: str | None = None) -> list[JiraEvent]:
+        """Получает события по задачам целевого юзера с указанного времени.
 
-        Для задач где пользователь: assignee, reporter или watcher.
+        Отслеживает: создание задач, новые комментарии, изменения статуса, новые назначения.
+
+        target=None → личный канал: задачи где я assignee, reporter или watcher.
+        target="X"  → канал коллеги: только задачи, назначенные на X (ADR-0001).
         """
         events: list[JiraEvent] = []
-        current_user = self.client.current_user()
 
         # Формат даты для JQL
         since_str = since.strftime("%Y-%m-%d %H:%M")
 
-        # Поиск задач, обновлённых с указанного времени
-        # Ищем задачи где я assignee, reporter или watcher
-        jql = (
-            f'(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) '
-            f'AND updated >= "{since_str}" ORDER BY updated DESC'
-        )
+        if target is None:
+            # Личный канал: задачи, где я assignee, reporter или watcher
+            assign_target = self.client.current_user()
+            jql = (
+                f'(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) '
+                f'AND updated >= "{since_str}" ORDER BY updated DESC'
+            )
+        else:
+            # Канал коллеги: только назначенные на него (ADR-0001) — это и «его тикеты»
+            # по смыслу, и обход прав Manage Watchers (watcher по чужому юзеру не спрашиваем).
+            assign_target = target
+            jql = f'assignee = "{target}" AND updated >= "{since_str}" ORDER BY updated DESC'
 
         issues = self.client.search_issues(
             jql,
@@ -334,8 +346,12 @@ class JiraService:
                                 timestamp=history_created,
                                 to_status=item.toString,
                             ))
-                        elif item.field == "assignee" and item.to == current_user:
+                        elif item.field == "assignee" and item.to == assign_target:
                             # item.to содержит username/accountId, item.toString - displayName
+                            assigned_details = (
+                                "Назначено на вас" if target is None
+                                else f"Назначено на {item.toString}"
+                            )
                             events.append(JiraEvent(
                                 id=f"assign_{history.id}_{item.field}",
                                 issue_key=issue.key,
@@ -344,7 +360,7 @@ class JiraService:
                                 event_type="assigned",
                                 author=author_display,
                                 author_id=author_name,
-                                details=f"Назначено на вас",
+                                details=assigned_details,
                                 timestamp=history_created,
                             ))
 

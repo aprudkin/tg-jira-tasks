@@ -42,3 +42,16 @@ def test_format_event_status_change_shows_arrow():
     assert "🔄" in text
     assert "Изменение статуса" in text
     assert "→" in text
+
+
+def test_format_event_marker_precedes_event_icon():
+    """Маркер канала коллеги идёт впереди event-type иконки."""
+    text = notification_service._format_event(_event("comment"), "🔵")
+    assert "🔵" in text
+    assert text.index("🔵") < text.index("💬")
+
+
+def test_format_event_no_marker_by_default():
+    """Личный канал (marker=None) — без маркера, как раньше."""
+    text = notification_service._format_event(_event("comment"))
+    assert "🔵" not in text

@@ -1,8 +1,7 @@
-"""Mock-based тесты для NotificationService._check_notifications.
+"""Mock-based тесты проверки канала (NotificationService._check_channel via check_now).
 
-Подмена jira_service.get_events_since и Bot.send_message — вся логика
-дедупликации, очистки при close и обновления last_check проверяется
-без сети.
+Подмена jira_service.get_events_since и Bot.send_message — вся логика дедупликации
+(на канал), очистки при close и обновления last_check проверяется без сети.
 """
 from datetime import datetime
 from unittest.mock import AsyncMock
@@ -23,12 +22,20 @@ def isolated_state(tmp_path, monkeypatch):
 
 @pytest.fixture
 def svc(isolated_state):
-    """NotificationService с подписанным chat_id и mock-ботом."""
+    """NotificationService с подписанным личным каналом и mock-ботом."""
     s = nots.NotificationService()
     s._bot = AsyncMock()
     s._chat_id = 555
-    s._last_check = datetime(2026, 1, 1, 12, 0, 0)
+    s._channels[nots.PERSONAL] = nots.Channel(
+        user=nots.PERSONAL,
+        interval_minutes=30,
+        last_check=datetime(2026, 1, 1, 12, 0, 0),
+    )
     return s
+
+
+def _me(svc) -> nots.Channel:
+    return svc._channels[nots.PERSONAL]
 
 
 def _evt(issue_key: str, event_id: str, event_type: str = "comment", to_status: str | None = None) -> JiraEvent:
@@ -53,25 +60,25 @@ async def test_first_check_sends_all_events(svc, monkeypatch):
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     assert svc._bot.send_message.await_count == 2
-    assert svc._processed_events["X-1"] == {"c1", "c2"}
+    assert _me(svc).processed_events["X-1"] == {"c1", "c2"}
 
 
 @pytest.mark.asyncio
 async def test_dedup_skips_already_processed(svc, monkeypatch):
-    svc._processed_events["X-1"] = {"c1"}
+    _me(svc).processed_events["X-1"] = {"c1"}
     events = [_evt("X-1", "c1"), _evt("X-1", "c2")]
     monkeypatch.setattr(
         "bot.services.notifications.jira_service.get_events_since",
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     assert svc._bot.send_message.await_count == 1
-    assert svc._processed_events["X-1"] == {"c1", "c2"}
+    assert _me(svc).processed_events["X-1"] == {"c1", "c2"}
 
 
 @pytest.mark.asyncio
@@ -85,10 +92,10 @@ async def test_close_status_clears_dedup_history(svc, monkeypatch):
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     # После Done вся история X-1 должна быть очищена
-    assert "X-1" not in svc._processed_events
+    assert "X-1" not in _me(svc).processed_events
 
 
 @pytest.mark.asyncio
@@ -103,24 +110,24 @@ async def test_reopen_does_not_clear_dedup_history(svc, monkeypatch):
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
-    assert "X-1" in svc._processed_events
-    assert {"c1", "s1"}.issubset(svc._processed_events["X-1"])
+    assert "X-1" in _me(svc).processed_events
+    assert {"c1", "s1"}.issubset(_me(svc).processed_events["X-1"])
 
 
 @pytest.mark.asyncio
 async def test_last_check_advances_even_when_no_events(svc, monkeypatch):
-    initial = svc._last_check
+    initial = _me(svc).last_check
     monkeypatch.setattr(
         "bot.services.notifications.jira_service.get_events_since",
         AsyncMock(return_value=[]),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
-    assert svc._last_check is not None
-    assert svc._last_check > initial
+    assert _me(svc).last_check is not None
+    assert _me(svc).last_check > initial
     svc._bot.send_message.assert_not_awaited()
 
 
@@ -133,7 +140,7 @@ async def test_check_skipped_without_subscription(svc, monkeypatch):
         mock_get,
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     mock_get.assert_not_awaited()
     svc._bot.send_message.assert_not_awaited()
@@ -167,11 +174,11 @@ async def test_telegram_rate_limit_triggers_retry(svc, monkeypatch):
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     assert call_count == 2  # первый — 429, второй — успех
     assert 7 in sleep_calls
-    assert svc._processed_events["X-1"] == {"c1"}
+    assert _me(svc).processed_events["X-1"] == {"c1"}
 
 
 @pytest.mark.asyncio
@@ -195,7 +202,7 @@ async def test_telegram_rate_limit_gives_up_after_one_retry(svc, monkeypatch):
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     # 2 attempt'а, не больше (no infinite loop)
     assert svc._bot.send_message.await_count == 2
@@ -210,7 +217,7 @@ async def test_silent_user_disables_notification_sound(svc, monkeypatch):
         AsyncMock(return_value=events),
     )
 
-    await svc._check_notifications()
+    await svc.check_now()
 
     call = svc._bot.send_message.await_args
     assert call.kwargs["disable_notification"] is True

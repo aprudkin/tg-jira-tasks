@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from collections import defaultdict
 
 from aiogram import Router
@@ -8,7 +9,7 @@ from aiogram.types import Message
 from aiogram.utils.markdown import hbold, hlink
 
 from bot.services.jira import jira_service, JiraTask
-from bot.services.notifications import notification_service
+from bot.services.notifications import notification_service, PERSONAL
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,43 @@ LOADING_DELETE_DELAY = 5
 
 # Удерживаем ссылки на фоновые задачи, чтобы их не собрал GC до завершения.
 _pending_tasks: set[asyncio.Task] = set()
+
+
+def _is_marker(token: str) -> bool:
+    """Прагматичная проверка «это маркер-эмодзи»: короткий кластер без ASCII-букв/цифр.
+
+    Идеальный emoji-детект не гоняем — достаточно отсечь текст и числа.
+    """
+    if not token or len(token) > 8:
+        return False
+    return re.search(r"[A-Za-z0-9]", token) is None
+
+
+def parse_track_args(args: str) -> tuple[str, str | None, int | None]:
+    """Разбирает аргументы /track: '<user> [эмодзи] [интервал]' (хвост — в любом порядке).
+
+    Токены после user определяются по типу: число → интервал (>=1), иначе → маркер.
+    Возвращает (user, emoji|None, interval|None). Бросает ValueError при пустом вводе,
+    нулевом/отрицательном интервале или нераспознанном (не-эмодзи) аргументе.
+    """
+    tokens = args.split()
+    if not tokens:
+        raise ValueError("empty /track args: user required")
+
+    user = tokens[0]
+    emoji: str | None = None
+    interval: int | None = None
+    for token in tokens[1:]:
+        if token.isdigit():
+            value = int(token)
+            if value < 1:
+                raise ValueError("interval must be at least 1 minute")
+            interval = value
+        elif emoji is None and _is_marker(token):
+            emoji = token
+        else:
+            raise ValueError(f"unrecognized argument: {token}")
+    return user, emoji, interval
 
 
 def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
@@ -156,7 +194,11 @@ async def cmd_start(message: Message) -> None:
         "/sync [мин] — Включить уведомления (по умолчанию 30 мин)\n"
         "/unsync — Отключить уведомления\n"
         "/silent [user] — Отключить звук от пользователя\n"
-        "/unsilent [user] — Включить звук от пользователя"
+        "/unsilent [user] — Включить звук от пользователя\n\n"
+        "👥 <b>Слежение за коллегами:</b>\n"
+        "/track &lt;user&gt; [эмодзи] [мин] — Следить за задачами коллеги\n"
+        "/untrack &lt;user&gt; — Перестать следить\n"
+        "/tracks — Список отслеживаемых каналов"
     )
 
 
@@ -350,6 +392,90 @@ async def cmd_unsync(message: Message) -> None:
         await message.answer("🔕 Notifications disabled.")
     else:
         await message.answer("Failed to disable notifications.")
+
+
+TRACK_USAGE = "Usage: /track <jira-user> [эмодзи] [интервал]\nПример: /track jdoe 🔵 15"
+
+
+@router.message(Command("track"))
+async def cmd_track(message: Message, command: CommandObject) -> None:
+    """Обработчик /track - поднимает независимый канал слежения за задачами коллеги."""
+    if not command.args:
+        await message.answer(TRACK_USAGE)
+        return
+
+    try:
+        user, emoji, interval = parse_track_args(command.args)
+    except ValueError:
+        await message.answer(f"Не разобрал аргументы.\n{TRACK_USAGE}")
+        return
+
+    if user == PERSONAL:
+        await message.answer("Это служебное имя личного канала. Для своих задач — /sync.")
+        return
+
+    if not notification_service.bind_chat(message.chat.id):
+        await message.answer("Бот уже привязан к другому чату.")
+        return
+
+    # Проба видимости: может ли учётка бота вообще читать задачи этого юзера
+    try:
+        count = await jira_service.count_assigned(user)
+    except Exception:
+        logger.exception("track probe failed for %s", user)
+        await message.answer(
+            f"⚠️ Не могу прочитать задачи '{user}'. Проверь Jira-имя и права бота."
+        )
+        return
+
+    channel = await notification_service.add_channel(user, emoji, interval)
+    tail = (
+        f"сейчас 0 назначенных задач" if count == 0
+        else f"{count} назначенных задач"
+    )
+    await message.answer(
+        f"{channel.emoji} Слежу за '{user}' ({tail}). Интервал {channel.interval_minutes} мин."
+    )
+    # Немедленная первая проверка канала
+    await notification_service.check_now(user)
+
+
+@router.message(Command("untrack"))
+async def cmd_untrack(message: Message, command: CommandObject) -> None:
+    """Обработчик /untrack - убирает канал слежения за коллегой."""
+    if not command.args or not command.args.strip():
+        await message.answer("Usage: /untrack <jira-user>")
+        return
+
+    user = command.args.strip().split()[0]
+    if await notification_service.remove_channel(user):
+        await message.answer(f"🚫 Больше не слежу за '{user}'.")
+    else:
+        await message.answer(f"'{user}' не отслеживается.")
+
+
+@router.message(Command("tracks"))
+async def cmd_tracks(message: Message) -> None:
+    """Обработчик /tracks - список активных каналов слежения за коллегами."""
+    channels = notification_service.list_channels()
+    colleagues = [c for c in channels if not c.is_personal]
+    if not colleagues:
+        await message.answer(
+            "Нет отслеживаемых коллег.\nДобавить: /track <jira-user> [эмодзи] [интервал]"
+        )
+        return
+
+    lines = [hbold("Отслеживаемые каналы:"), ""]
+    for channel in channels:
+        if channel.is_personal:
+            lines.append(f"👤 <b>ты</b> (личный) — интервал {channel.interval_minutes} мин")
+        else:
+            last = channel.last_check.strftime("%H:%M") if channel.last_check else "—"
+            lines.append(
+                f"{channel.emoji} <b>{channel.user}</b> — интервал {channel.interval_minutes} мин, "
+                f"проверен {last} UTC"
+            )
+    await message.answer("\n".join(lines))
 
 
 async def _resolve_target_user(message: Message, command: CommandObject) -> str | None:
