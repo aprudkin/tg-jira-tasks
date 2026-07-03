@@ -16,6 +16,14 @@ _Avoid_: Colleague, employee, watchee (a colleague is one *kind* of tracked user
 An independent monitoring stream for exactly one tracked user. Each channel carries its own check interval, its own last-checked point, its own marker emoji, and its own on/off state. All channels deliver to the same subscribed chat. "My" sync is one channel; each tracked colleague is another.
 _Avoid_: Subscription (that named the old single-user model), watch, feed
 
+**Personal channel**:
+The sync channel for the bot's own Jira account (`currentUser()`, "me"). Carries no marker emoji — in a single-owner chat its events need no attribution. Managed via `/sync` and `/unsync`.
+_Avoid_: Subscription, my sync
+
+**Colleague channel**:
+A sync channel for a tracked user other than "me", matched by Jira username and tagged with a marker emoji. Managed via `/track` and `/untrack`. One *kind* of sync channel (the counterpart to the personal channel), not a synonym for tracked user.
+_Avoid_: Watch, follow
+
 **Marker emoji**:
 The emoji that tags a channel's notifications so a reader can attribute an event to its tracked user within the shared chat. Distinct from the event-type icon.
 _Avoid_: Icon (reserved for event-type icon), badge, tag
@@ -27,3 +35,7 @@ _Avoid_: Emoji (ambiguous — could mean marker emoji)
 **Event**:
 A single Jira change surfaced to the subscribed chat: an issue created, a comment added, a status change, or an assignment. Deduplicated per channel by a stable id.
 _Avoid_: Notification (an event is the source; the notification is its rendered message), update, change
+
+**Muted author**:
+A Jira identity whose authored events are delivered to the subscribed chat silently (no Telegram sound). Cross-cutting: applied across every sync channel and matched by the event's author, independent of which channel surfaced the event.
+_Avoid_: Silent user, muted user (both overload "user" — this concerns the event's author, not the tracked user)
