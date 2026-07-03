@@ -27,4 +27,5 @@ def fake_jira():
     """
     jira = AsyncMock()
     jira.get_events_since = AsyncMock(return_value=[])
+    jira.count_assigned = AsyncMock(return_value=0)
     return jira

@@ -67,6 +67,24 @@ class Channel:
         return None if self.is_personal else self.user
 
 
+@dataclass
+class EnableOutcome:
+    """Итог enable_personal — хендлер по нему рендерит ответ."""
+
+    status: str  # "enabled" | "interval_changed" | "unchanged" | "chat_busy"
+    interval: int = 0
+    old_interval: int = 0
+
+
+@dataclass
+class TrackOutcome:
+    """Итог track_colleague — хендлер по нему рендерит ответ."""
+
+    status: str  # "tracked" | "chat_busy" | "probe_failed"
+    channel: Channel | None = None
+    assigned_count: int = 0
+
+
 class NotificationService:
     """Сервис отправки уведомлений о событиях Jira по независимым каналам."""
 
@@ -240,6 +258,25 @@ class NotificationService:
         await self._save_state()
         return channel
 
+    async def track_colleague(
+        self, chat_id: int, user: str, emoji: str | None = None, interval: int | None = None
+    ) -> TrackOutcome:
+        """Поднимает канал слежения за коллегой: решение + мутация состояния.
+
+        Порядок bind→проба→add сохранён намеренно: неудачная проба оставляет чат
+        привязанным без канала (прежнее поведение). check_now — за хендлером, после ответа.
+        """
+        if not self._bind_chat(chat_id):
+            return TrackOutcome("chat_busy")
+        # Проба видимости: может ли учётка бота вообще читать задачи этого юзера
+        try:
+            count = await self._jira.count_assigned(user)
+        except Exception:
+            logger.exception("track probe failed for %s", user)
+            return TrackOutcome("probe_failed")
+        channel = await self.add_channel(user, emoji, interval)
+        return TrackOutcome("tracked", channel=channel, assigned_count=count)
+
     async def remove_channel(self, user: str) -> bool:
         """Убирает канал коллеги (личный канал через remove_channel не трогается)."""
         if user == PERSONAL or user not in self._channels:
@@ -307,6 +344,23 @@ class NotificationService:
         await self._save_state()
         logger.info("Updated personal interval to %d min", interval_minutes)
         return True
+
+    async def enable_personal(self, chat_id: int, interval_minutes: int | None = None) -> EnableOutcome:
+        """Включает или обновляет личный канал: решение + мутация состояния.
+
+        check_now НЕ вызывается здесь — он остаётся за хендлером и выполняется ПОСЛЕ
+        подтверждающего ответа, иначе уведомления о событиях уйдут раньше подтверждения.
+        """
+        if self.is_subscribed(chat_id):
+            current = self.get_interval()
+            new = interval_minutes or current
+            if new != current:
+                await self.update_interval(chat_id, new)
+                return EnableOutcome("interval_changed", interval=new, old_interval=current)
+            return EnableOutcome("unchanged", interval=current)
+        if await self.subscribe(chat_id, interval_minutes):
+            return EnableOutcome("enabled", interval=interval_minutes or self.DEFAULT_INTERVAL_MINUTES)
+        return EnableOutcome("chat_busy")
 
     async def check_now(self, user: str = PERSONAL) -> None:
         """Немедленная проверка канала (по умолчанию — личного)."""

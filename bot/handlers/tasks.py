@@ -17,9 +17,6 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# Интервал по умолчанию для уведомлений (в минутах)
-DEFAULT_NOTIFICATION_INTERVAL = 30
-
 # Сообщение пользователю при ошибке Jira (детали — только в логах с exc_info)
 JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 
@@ -339,37 +336,31 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
         except ValueError:
             await message.answer(
                 "Invalid interval. Usage: /sync [minutes]\n"
-                f"Example: /sync 15 (default: {DEFAULT_NOTIFICATION_INTERVAL})"
+                f"Example: /sync 15 (default: {notification_service.DEFAULT_INTERVAL_MINUTES})"
             )
             return
 
-    # Если уже подписан - обновляем интервал и запускаем проверку
-    if notification_service.is_subscribed(chat_id):
-        current_interval = notification_service.get_interval()
-        new_interval = interval_minutes or current_interval
+    outcome = await notification_service.enable_personal(chat_id, interval_minutes)
 
-        if new_interval != current_interval:
-            await notification_service.update_interval(chat_id, new_interval)
-            await message.answer(f"🔄 Interval updated: {current_interval} → {new_interval} min\nChecking for updates...")
-        else:
-            await message.answer("Checking for updates...")
-
-        # Запускаем немедленную проверку
+    if outcome.status == "interval_changed":
+        await message.answer(
+            f"🔄 Interval updated: {outcome.old_interval} → {outcome.interval} min\nChecking for updates..."
+        )
+        # check_now — ПОСЛЕ подтверждения, иначе уведомления уйдут раньше него
         await notification_service.check_now()
-        return
-
-    # Новая подписка
-    if await notification_service.subscribe(chat_id, interval_minutes):
-        actual_interval = interval_minutes or DEFAULT_NOTIFICATION_INTERVAL
+    elif outcome.status == "unchanged":
+        await message.answer("Checking for updates...")
+        await notification_service.check_now()
+    elif outcome.status == "enabled":
         await message.answer(
             f"✅ Notifications enabled!\n\n"
-            f"You will receive updates every {actual_interval} minutes:\n"
+            f"You will receive updates every {outcome.interval} minutes:\n"
             "- New comments on your tasks\n"
             "- Status changes by others\n"
             "- New task assignments\n\n"
             "Use /unsync to disable."
         )
-    else:
+    else:  # chat_busy
         await message.answer("Failed to enable notifications.")
 
 
@@ -408,29 +399,26 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
         await message.answer("Это служебное имя личного канала. Для своих задач — /sync.")
         return
 
-    if not notification_service.bind_chat(message.chat.id):
+    outcome = await notification_service.track_colleague(message.chat.id, user, emoji, interval)
+
+    if outcome.status == "chat_busy":
         await message.answer("Бот уже привязан к другому чату.")
         return
-
-    # Проба видимости: может ли учётка бота вообще читать задачи этого юзера
-    try:
-        count = await jira_service.count_assigned(user)
-    except Exception:
-        logger.exception("track probe failed for %s", user)
+    if outcome.status == "probe_failed":
         await message.answer(
             f"⚠️ Не могу прочитать задачи '{user}'. Проверь Jira-имя и права бота."
         )
         return
 
-    channel = await notification_service.add_channel(user, emoji, interval)
+    channel = outcome.channel
     tail = (
-        f"сейчас 0 назначенных задач" if count == 0
-        else f"{count} назначенных задач"
+        "сейчас 0 назначенных задач" if outcome.assigned_count == 0
+        else f"{outcome.assigned_count} назначенных задач"
     )
     await message.answer(
         f"{channel.emoji} Слежу за '{user}' ({tail}). Интервал {channel.interval_minutes} мин."
     )
-    # Немедленная первая проверка канала
+    # Немедленная первая проверка канала — ПОСЛЕ подтверждающего ответа
     await notification_service.check_now(user)
 
 
