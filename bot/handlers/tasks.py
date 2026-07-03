@@ -6,9 +6,10 @@ from collections import defaultdict
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
-from aiogram.utils.markdown import hbold, hlink
+from aiogram.utils.markdown import hbold
 
 from bot import status
+from bot.render import issue_ref
 from bot.services.jira import jira_service, JiraTask
 from bot.services.notifications import notification_service, PERSONAL
 
@@ -89,7 +90,7 @@ def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
 
 def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool = False) -> str:
     """Форматирует задачу для отображения в Telegram."""
-    line = f"- {hlink(task.key, task.url)}: {task.summary}"
+    line = f"- {issue_ref(task.key, task.url, task.summary)}"
     if show_assignee or show_status:
         details = []
         if show_assignee:

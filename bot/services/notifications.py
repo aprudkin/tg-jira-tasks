@@ -7,9 +7,10 @@ from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.utils.markdown import hbold, hlink
+from aiogram.utils.markdown import hbold
 
 from bot.config import settings
+from bot.render import issue_ref
 from bot.services.jira import jira_service, JiraEvent, utc_now_naive
 from bot.status import CLOSED_GROUP
 
@@ -461,7 +462,7 @@ class NotificationService:
         header = f"{marker} {icon}" if marker else icon
         lines = [
             f"{header} {hbold(title)}",
-            f"{hlink(event.issue_key, event.issue_url)}: {event.issue_summary}",
+            issue_ref(event.issue_key, event.issue_url, event.issue_summary),
             f"От: {event.author}",
             f"{event.details}",
         ]
