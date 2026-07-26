@@ -55,6 +55,5 @@ docker-compose.override.yml
 .claude/
 .mcp.json
 .agent/
-CLAUDE.md
 ANTIGRAVITY.md
 .osgrep
