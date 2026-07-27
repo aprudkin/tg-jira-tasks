@@ -56,3 +56,19 @@ docker-compose.override.yml
 .mcp.json
 .agent/
 ANTIGRAVITY.md
+
+# --- added by /new-project standard ---
+Thumbs.db
+*~
+.claude/settings.local.json
+.serena/
+.env.local
+secrets/
+state.json
+logs/
+tmp/
+.venv/
+node_modules/
+*.test
+TestResults.xml
+coverage.xml
