@@ -36,7 +36,6 @@ rsync -avz --delete \
   --exclude='.venv/' \
   --exclude='__pycache__/' \
   --exclude='.claude/' \
-  --exclude='.osgrep/' \
   --exclude='.mcp.json' \
   --exclude='.DS_Store' \
   --exclude='CLAUDE.md' \

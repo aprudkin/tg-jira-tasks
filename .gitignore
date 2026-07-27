@@ -56,4 +56,3 @@ docker-compose.override.yml
 .mcp.json
 .agent/
 ANTIGRAVITY.md
-.osgrep
