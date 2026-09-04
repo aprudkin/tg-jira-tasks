@@ -1,9 +1,10 @@
 # Lessons
 
-## 2026-03-02 — Always create aimem issue after completing work
-- **Failure mode:** Completed a refactor (remove redundant `parse_mode`), committed, and reported results — but skipped creating an aimem issue as required by DoD in global CLAUDE.md.
+## 2026-03-02 — Retired shared-tracker workflow
+
+- **Failure mode:** Completed a refactor (remove redundant `parse_mode`), committed, and reported results without following the issue workflow that was configured at the time.
 - **Detection signal:** User had to explicitly ask "why wasn't this done?" after the work was complete.
-- **Prevention rule:** After any commit, before reporting results to the user, check DoD: create aimem issue → add to project board → close with final checkpoint. This applies even for small refactors.
+- **Current rule:** Do not create an issue after every commit automatically. When the user requests an issue, create it in this repository's GitHub Issues tracker regardless of task size.
 
 ## 2026-06-26 — Verify where a service runs before editing config to change its behavior
 - **Failure mode:** Edited the local `.env` (token/owner) to fix a misbehaving bot, but the bot runs in Docker on a remote server (143.110.233.82) and the deploy `rsync` excludes `.env` — so the local edit was inert and changed nothing in production. The real cause was a revoked token on the *server's* config (`TelegramUnauthorizedError` loop).
