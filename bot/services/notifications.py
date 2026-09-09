@@ -56,6 +56,8 @@ class Channel:
     # Дедуп на канал: {issue_key: set(event_ids)}
     processed_events: dict[str, set[str]] = field(default_factory=dict)
     last_check: datetime | None = None
+    # Не сериализуется: не даёт проверке пережить удаление своего канала.
+    check_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     @property
     def is_personal(self) -> bool:
@@ -83,6 +85,10 @@ class TrackOutcome:
     status: str  # "tracked" | "chat_busy" | "probe_failed"
     channel: Channel | None = None
     assigned_count: int = 0
+
+
+class StateSaveError(RuntimeError):
+    """Состояние уведомлений не удалось надёжно сохранить."""
 
 
 class NotificationService:
@@ -114,6 +120,8 @@ class NotificationService:
         self._tasks: dict[str, asyncio.Task] = {}
         # Сериализует конкурентные сохранения от разных каналов (общий tmp-файл)
         self._save_lock = asyncio.Lock()
+        # Сериализует добавление и удаление каналов с остановкой их фоновых задач.
+        self._lifecycle_lock = asyncio.Lock()
         # Загружаем сохранённое состояние при инициализации
         self._load_state()
 
@@ -182,38 +190,45 @@ class NotificationService:
 
     def _write_state(self, payload: str) -> None:
         """Атомарно пишет уже сериализованную строку (может выполняться в to_thread)."""
-        try:
-            state_file = self._state_path()
-            state_file.parent.mkdir(parents=True, exist_ok=True)
-            # Пишем во временный файл и атомарно подменяем — иначе падение бота посреди
-            # write_text оставит обрезанный JSON, а _load_state молча сбросит подписку.
-            tmp = state_file.with_suffix(state_file.suffix + ".tmp")
-            tmp.write_text(payload)
-            tmp.replace(state_file)
-            logger.info("Subscription state saved")
-        except Exception:
-            logger.exception("Error saving state")
+        state_file = self._state_path()
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        # Пишем во временный файл и атомарно подменяем — иначе падение бота посреди
+        # write_text оставит обрезанный JSON, а _load_state молча сбросит подписку.
+        tmp = state_file.with_suffix(state_file.suffix + ".tmp")
+        tmp.write_text(payload)
+        tmp.replace(state_file)
+        logger.info("Subscription state saved")
 
     def _save_state_sync(self) -> None:
         """Синхронное сохранение (тесты / прямые вызовы)."""
         try:
             payload = self._serialize_state()
+            self._write_state(payload)
         except Exception:
-            logger.exception("Error serializing state")
-            return
-        self._write_state(payload)
+            logger.exception("Error saving state")
 
     async def _save_state(self) -> None:
-        """Concurrency-safe сохранение: снапшот строится в event-loop потоке, запись —
-        под asyncio.Lock, чтобы конкурентные сохранения от разных каналов не гонялись
-        за общий tmp-файл (иначе битый JSON → потеря подписки при загрузке)."""
-        try:
-            payload = self._serialize_state()
-        except Exception:
-            logger.exception("Error serializing state")
-            return
+        """Сохраняет актуальный снапшот, не отпуская lock раньше потока записи."""
         async with self._save_lock:
-            await asyncio.to_thread(self._write_state, payload)
+            try:
+                # Снапшот строим только после получения lock: ожидавший save не должен
+                # записать состояние, устаревшее за время ожидания.
+                payload = self._serialize_state()
+            except Exception as error:
+                logger.exception("Error serializing state")
+                raise StateSaveError("Не удалось сериализовать состояние") from error
+
+            write_task = asyncio.create_task(asyncio.to_thread(self._write_state, payload))
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                # to_thread продолжает работу после отмены await. Ждём его под lock,
+                # иначе следующая запись столкнётся с ним за общий tmp-файл.
+                await write_task
+                raise
+            except Exception as error:
+                logger.exception("Error saving state")
+                raise StateSaveError("Не удалось записать состояние") from error
 
     # ---- Привязка чата и каналы ------------------------------------------
 
@@ -239,24 +254,25 @@ class NotificationService:
 
     async def add_channel(self, user: str, emoji: str | None = None, interval: int | None = None) -> Channel:
         """Создаёт или (идемпотентно) обновляет канал коллеги. Чат должен быть уже привязан."""
-        existing = self._channels.get(user)
-        if existing is not None:
-            existing.interval_minutes = interval or existing.interval_minutes
-            if emoji is not None:
-                existing.emoji = emoji
-            existing.last_check = utc_now_naive()
-            channel = existing
-        else:
-            channel = Channel(
-                user=user,
-                interval_minutes=interval or self.DEFAULT_INTERVAL_MINUTES,
-                emoji=self._resolve_marker(emoji),
-                last_check=utc_now_naive(),
-            )
-            self._channels[user] = channel
-            self._start_channel_task(channel)
-        await self._save_state()
-        return channel
+        async with self._lifecycle_lock:
+            existing = self._channels.get(user)
+            if existing is not None:
+                existing.interval_minutes = interval or existing.interval_minutes
+                if emoji is not None:
+                    existing.emoji = emoji
+                existing.last_check = utc_now_naive()
+                channel = existing
+            else:
+                channel = Channel(
+                    user=user,
+                    interval_minutes=interval or self.DEFAULT_INTERVAL_MINUTES,
+                    emoji=self._resolve_marker(emoji),
+                    last_check=utc_now_naive(),
+                )
+                self._channels[user] = channel
+                self._start_channel_task(channel)
+            await self._save_state()
+            return channel
 
     async def track_colleague(
         self, chat_id: int, user: str, emoji: str | None = None, interval: int | None = None
@@ -277,19 +293,39 @@ class NotificationService:
         channel = await self.add_channel(user, emoji, interval)
         return TrackOutcome("tracked", channel=channel, assigned_count=count)
 
-    async def remove_channel(self, user: str) -> bool:
-        """Убирает канал коллеги (личный канал через remove_channel не трогается)."""
-        if user == PERSONAL or user not in self._channels:
+    async def remove_channel(self, chat_id: int, user: str) -> bool:
+        """Убирает канал коллеги только по запросу из привязанного чата."""
+        if user == PERSONAL:
             return False
-        await self._remove_channel_internal(user)
-        return True
+        return await self._remove_channel_internal(user, expected_chat_id=chat_id)
 
-    async def _remove_channel_internal(self, user: str) -> None:
-        self._channels.pop(user, None)
-        self._cancel_channel_task(user)
-        if not self._channels:
-            self._chat_id = None
-        await self._save_state()
+    async def _remove_channel_internal(self, user: str, expected_chat_id: int | None = None) -> bool:
+        async with self._lifecycle_lock:
+            if expected_chat_id is not None and self._chat_id != expected_chat_id:
+                return False
+
+            channel = self._channels.pop(user, None)
+            if channel is None:
+                return False
+            previous_chat_id = self._chat_id
+
+            await self._cancel_channel_task(user)
+            # check_now выполняется вне фоновой задачи. Дожидаемся такой проверки:
+            # после удаления identity-check не даст ей отправить уведомления.
+            async with channel.check_lock:
+                pass
+
+            if not self._channels:
+                self._chat_id = None
+            try:
+                await self._save_state()
+            except StateSaveError:
+                # Не подтверждаем удаление, которое вернётся после перезапуска.
+                self._chat_id = previous_chat_id
+                self._channels[user] = channel
+                self._start_channel_task(channel)
+                raise
+            return True
 
     def list_channels(self) -> list[Channel]:
         """Каналы: личный первым, коллеги по имени."""
@@ -320,9 +356,10 @@ class NotificationService:
 
     async def unsubscribe(self, chat_id: int) -> bool:
         """Отписывает личный канал (каналы коллег остаются)."""
-        if self._chat_id != chat_id or PERSONAL not in self._channels:
+        if self._chat_id != chat_id:
             return False
-        await self._remove_channel_internal(PERSONAL)
+        if not await self._remove_channel_internal(PERSONAL):
+            return False
         logger.info("Unsubscribed personal channel")
         return True
 
@@ -401,10 +438,16 @@ class NotificationService:
             return
         self._tasks[channel.user] = asyncio.create_task(self._channel_loop(channel))
 
-    def _cancel_channel_task(self, user: str) -> None:
+    async def _cancel_channel_task(self, user: str) -> None:
+        """Отменяет и дожидается фоновой задачи до подтверждения удаления канала."""
         task = self._tasks.pop(user, None)
-        if task is not None and not task.done():
-            task.cancel()
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def stop(self) -> None:
         """Останавливает все фоновые задачи и ожидает их завершения."""
@@ -435,9 +478,9 @@ class NotificationService:
 
                 await self._check_channel(channel)
             except asyncio.CancelledError:
-                if self._stopping or channel.user not in self._channels:
+                if self._stopping or self._channels.get(channel.user) is not channel:
                     break
-                # Неожиданная внешняя отмена — подавляем и перезапускаем цикл
+                # Неожиданная внешняя отмена — подавляем только у всё ещё текущего объекта канала.
                 asyncio.current_task().uncancel()
                 logger.warning("Channel %s loop cancelled unexpectedly, restarting", channel.user)
                 sleep_secs = self._first_check_delay
@@ -448,36 +491,46 @@ class NotificationService:
 
     async def _check_channel(self, channel: Channel) -> None:
         """Проверяет один канал: дедуп на канал (ADR-0002), маркер канала в уведомлении."""
-        if not self._bot or self._chat_id is None or channel.last_check is None:
-            return
+        async with channel.check_lock:
+            if (
+                self._channels.get(channel.user) is not channel
+                or not self._bot
+                or self._chat_id is None
+                or channel.last_check is None
+            ):
+                return
 
-        try:
-            events = await self._jira.get_events_since(channel.last_check, channel.jira_target)
+            try:
+                events = await self._jira.get_events_since(channel.last_check, channel.jira_target)
 
-            if events:
-                new_events = []
-                for event in events:
-                    bucket = channel.processed_events.setdefault(event.issue_key, set())
-                    if event.id not in bucket:
-                        new_events.append(event)
+                # Канал могли удалить, пока Jira-запрос выполнялся в отдельном потоке.
+                if self._channels.get(channel.user) is not channel:
+                    return
 
-                if new_events:
-                    await self._send_events(self._chat_id, new_events, channel.emoji)
+                if events:
+                    new_events = []
+                    for event in events:
+                        bucket = channel.processed_events.setdefault(event.issue_key, set())
+                        if event.id not in bucket:
+                            new_events.append(event)
 
-                    for event in new_events:
-                        channel.processed_events[event.issue_key].add(event.id)
+                    if new_events:
+                        await self._send_events(self._chat_id, new_events, channel.emoji)
 
-                    # Очищаем историю задач, перешедших в закрытый статус
-                    for event in new_events:
-                        if event.event_type == "status_change" and event.to_status in CLOSED_GROUP:
-                            channel.processed_events.pop(event.issue_key, None)
+                        for event in new_events:
+                            channel.processed_events[event.issue_key].add(event.id)
 
-                    await self._save_state()
+                        # Очищаем историю задач, перешедших в закрытый статус
+                        for event in new_events:
+                            if event.event_type == "status_change" and event.to_status in CLOSED_GROUP:
+                                channel.processed_events.pop(event.issue_key, None)
 
-            channel.last_check = utc_now_naive()
+                        await self._save_state()
 
-        except Exception:
-            logger.exception("Error checking channel %s", channel.user)
+                channel.last_check = utc_now_naive()
+
+            except Exception:
+                logger.exception("Error checking channel %s", channel.user)
 
     async def _send_events(self, chat_id: int, events: list[JiraEvent], marker: str | None = None) -> None:
         """Отправляет уведомления о событиях с маркером канала."""

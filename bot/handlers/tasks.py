@@ -11,7 +11,7 @@ from aiogram.utils.markdown import hbold
 from bot import status
 from bot.render import issue_ref
 from bot.services.jira import jira_service, JiraTask
-from bot.services.notifications import notification_service, PERSONAL
+from bot.services.notifications import notification_service, PERSONAL, StateSaveError
 
 logger = logging.getLogger(__name__)
 
@@ -430,10 +430,17 @@ async def cmd_untrack(message: Message, command: CommandObject) -> None:
         return
 
     user = command.args.strip().split()[0]
-    if await notification_service.remove_channel(user):
+    try:
+        removed = await notification_service.remove_channel(message.chat.id, user)
+    except StateSaveError:
+        logger.exception("Failed to persist untrack for %s", user)
+        await message.answer("⚠️ Не удалось сохранить отключение. Попробуй ещё раз.")
+        return
+
+    if removed:
         await message.answer(f"🚫 Больше не слежу за '{user}'.")
     else:
-        await message.answer(f"'{user}' не отслеживается.")
+        await message.answer(f"'{user}' не отслеживается в этом чате.")
 
 
 @router.message(Command("tracks"))

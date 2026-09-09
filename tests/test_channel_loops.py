@@ -57,6 +57,55 @@ async def test_two_channel_loops_tick_deliver_and_persist(state_path):
 
 
 @pytest.mark.asyncio
+async def test_untrack_drains_direct_check_without_late_notification(state_path):
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def blocked_events(since, target=None):
+        fetch_started.set()
+        await release_fetch.wait()
+        return [_evt("JD-1", "late")]
+
+    s = nots.NotificationService(
+        jira=SimpleNamespace(get_events_since=blocked_events),
+        state_file=state_path,
+    )
+    s._bot = AsyncMock()
+    s._chat_id = 100
+    now = datetime(2026, 1, 1, 12, 0, 0)
+    s._channels[nots.PERSONAL] = nots.Channel(
+        user=nots.PERSONAL,
+        interval_minutes=30,
+        processed_events={"ME-1": {"seen"}},
+        last_check=now,
+    )
+    s._channels["i.roschina"] = nots.Channel(
+        user="i.roschina", interval_minutes=15, emoji="🔵", last_check=now
+    )
+
+    check_task = asyncio.create_task(s.check_now("i.roschina"))
+    await fetch_started.wait()
+    remove_task = asyncio.create_task(s.remove_channel(100, "i.roschina"))
+    await asyncio.sleep(0)
+
+    # /untrack уже деактивировал канал, но подтверждение ждёт текущую проверку.
+    assert s.get_channel("i.roschina") is None
+    assert not remove_task.done()
+
+    release_fetch.set()
+    assert await remove_task is True
+    await check_task
+
+    # Проверка, начатая до /untrack, не отправляет событие после деактивации.
+    s._bot.send_message.assert_not_awaited()
+
+    # Удаление записано на диск, остальные каналы и их дедуп не затронуты.
+    fresh = nots.NotificationService(state_file=state_path)
+    assert fresh.get_channel("i.roschina") is None
+    assert fresh.get_channel(nots.PERSONAL).processed_events["ME-1"] == {"seen"}
+
+
+@pytest.mark.asyncio
 async def test_concurrent_saves_produce_valid_state(state_path):
     s = nots.NotificationService(state_file=state_path)
     s._chat_id = 100

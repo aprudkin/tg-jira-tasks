@@ -61,22 +61,48 @@ async def test_add_channel_auto_marker_is_distinct(svc):
 @pytest.mark.asyncio
 async def test_remove_channel(svc):
     await svc.add_channel("jdoe", "🔵", 15)
-    assert await svc.remove_channel("jdoe") is True
+    assert await svc.remove_channel(100, "jdoe") is True
     assert svc.get_channel("jdoe") is None
 
 
 @pytest.mark.asyncio
 async def test_remove_personal_via_remove_channel_refused(svc):
     svc._channels[nots.PERSONAL] = nots.Channel(user=nots.PERSONAL, interval_minutes=30)
-    assert await svc.remove_channel(nots.PERSONAL) is False
+    assert await svc.remove_channel(100, nots.PERSONAL) is False
     assert nots.PERSONAL in svc._channels
 
 
 @pytest.mark.asyncio
 async def test_removing_last_channel_clears_chat(svc):
     await svc.add_channel("jdoe", "🔵", 15)
-    await svc.remove_channel("jdoe")
+    await svc.remove_channel(100, "jdoe")
     assert svc._chat_id is None
+
+
+@pytest.mark.asyncio
+async def test_remove_channel_rejects_another_chat(svc):
+    await svc.add_channel("jdoe", "🔵", 15)
+
+    assert await svc.remove_channel(200, "jdoe") is False
+    assert svc.get_channel("jdoe") is not None
+
+
+@pytest.mark.asyncio
+async def test_remove_channel_rolls_back_when_state_save_fails(svc, state_path, monkeypatch):
+    channel = await svc.add_channel("jdoe", "🔵", 15)
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(svc, "_write_state", fail_write)
+
+    with pytest.raises(nots.StateSaveError):
+        await svc.remove_channel(100, "jdoe")
+
+    assert svc.get_channel("jdoe") is channel
+    assert svc._chat_id == 100
+    fresh = nots.NotificationService(state_file=state_path)
+    assert fresh.get_channel("jdoe") is not None
 
 
 @pytest.mark.asyncio
