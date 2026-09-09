@@ -177,3 +177,60 @@ async def test_silent_user_disables_notification_sound(svc, fake_jira):
 
     call = svc._bot.send_message.await_args
     assert call.kwargs["disable_notification"] is True
+    assert call.kwargs["parse_mode"] is None
+
+
+@pytest.mark.asyncio
+async def test_long_notification_chunks_preserve_text_and_options(svc, fake_jira):
+    event = _evt("X-1", "c1")
+    event.issue_summary = "😀" * 2500 + " <component> & review"
+    event.issue_url = "https://jira.test/browse/X-1?value=" + "a" * 5000
+    event.author = '<Alice & "Bob">'
+    event.details = '<a href="bad">click</a>'
+    svc._silent_users = {"bob"}
+    fake_jira.get_events_since.return_value = [event]
+
+    expected_text = svc._format_event(event).render()[0]
+    await svc.check_now()
+
+    assert svc._bot.send_message.await_count >= 2
+    sent_text = "".join(call.kwargs["text"] for call in svc._bot.send_message.await_args_list)
+    assert sent_text == expected_text
+    for call in svc._bot.send_message.await_args_list:
+        assert call.kwargs["parse_mode"] is None
+        assert call.kwargs["disable_notification"] is True
+        assert len(call.kwargs["text"].encode("utf-16-le")) // 2 <= 4096
+    assert _me(svc).processed_events["X-1"] == {"c1"}
+
+
+@pytest.mark.asyncio
+async def test_long_notification_retries_only_failed_chunk(svc, fake_jira, monkeypatch):
+    """Уже отправленный фрагмент не дублируется при 429 на следующем."""
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendMessage
+
+    event = _evt("X-1", "c1")
+    event.details = "x" * 5000
+    fake_jira.get_events_since.return_value = [event]
+
+    real_sleep = nots.asyncio.sleep
+    async def fake_sleep(delay):
+        await real_sleep(0)
+    monkeypatch.setattr("bot.services.notifications.asyncio.sleep", fake_sleep)
+
+    attempts: list[str] = []
+    failed_second = False
+    async def fail_second_once(*args, **kwargs):
+        nonlocal failed_second
+        attempts.append(kwargs["text"])
+        if len(attempts) == 2 and not failed_second:
+            failed_second = True
+            raise TelegramRetryAfter(
+                method=SendMessage(chat_id=0, text=""), message="slow", retry_after=1
+            )
+
+    expected_chunks = [chunk.text for chunk in nots.split_message(svc._format_event(event))]
+    svc._bot.send_message = AsyncMock(side_effect=fail_second_once)
+    await svc.check_now()
+
+    assert attempts == [expected_chunks[0], expected_chunks[1], *expected_chunks[1:]]

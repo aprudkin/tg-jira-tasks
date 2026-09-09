@@ -6,10 +6,10 @@ from collections import defaultdict
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
-from aiogram.utils.markdown import hbold
+from aiogram.utils.formatting import Bold, Text
 
 from bot import status
-from bot.render import issue_ref
+from bot.render import issue_ref, join_text, split_message
 from bot.services.jira import jira_service, JiraTask
 from bot.services.notifications import notification_service, PERSONAL, StateSaveError
 
@@ -22,10 +22,6 @@ JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 
 # Текст loading-сообщения для большинства команд
 LOADING_TASKS = "Loading tasks..."
-
-# Лимит длины сообщения Telegram — 4096 UTF-16 code units. Берём с запасом
-# на накладные HTML-теги и эмодзи.
-TG_MESSAGE_CHUNK_SIZE = 4000
 
 # Задержка перед удалением loading-сообщения (в секундах)
 LOADING_DELETE_DELAY = 5
@@ -85,17 +81,17 @@ def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
     task.add_done_callback(_pending_tasks.discard)
 
 
-def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool = False) -> str:
+def format_task(task: JiraTask, show_status: bool = False, show_assignee: bool = False) -> Text:
     """Форматирует задачу для отображения в Telegram."""
-    line = f"- {issue_ref(task.key, task.url, task.summary)}"
+    body: list[Text | str] = ["- ", issue_ref(task.key, task.url, task.summary)]
     if show_assignee or show_status:
         details = []
         if show_assignee:
             details.append(task.assignee or "Unassigned")
         if show_status:
             details.append(task.status)
-        line += f"\n  └ {' | '.join(details)}"
-    return line
+        body.extend(["\n  └ ", " | ".join(details)])
+    return Text(*body)
 
 
 class _Failed:
@@ -105,38 +101,10 @@ class _Failed:
 _FAILED = _Failed()
 
 
-async def _answer_chunked(message: Message, text: str) -> None:
-    """Отправляет text, при необходимости бьёт на чанки по '\\n'.
-
-    Telegram ограничивает сообщение 4096 символами; при превышении aiogram
-    бросает TelegramBadRequest. Помогает командам с большим числом задач
-    (/sprint, /recent, /watching).
-    """
-    if len(text) <= TG_MESSAGE_CHUNK_SIZE:
-        await message.answer(text)
-        return
-
-    chunks: list[str] = []
-    current = ""
-    for line in text.split("\n"):
-        # Одна строка длиннее лимита — режем принудительно (edge case).
-        while len(line) > TG_MESSAGE_CHUNK_SIZE:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:TG_MESSAGE_CHUNK_SIZE])
-            line = line[TG_MESSAGE_CHUNK_SIZE:]
-        sep = "\n" if current else ""
-        if len(current) + len(sep) + len(line) <= TG_MESSAGE_CHUNK_SIZE:
-            current += sep + line
-        else:
-            chunks.append(current)
-            current = line
-    if current:
-        chunks.append(current)
-
-    for chunk in chunks:
-        await message.answer(chunk)
+async def _answer_chunked(message: Message, content: Text | str) -> None:
+    """Отправляет сообщение безопасными фрагментами с Telegram entities."""
+    for chunk in split_message(content):
+        await message.answer(**chunk.as_kwargs())
 
 
 async def _safe_fetch(message: Message, loading_text: str, fetch):
@@ -156,7 +124,7 @@ async def _safe_fetch(message: Message, loading_text: str, fetch):
         schedule_delete(loading_msg)
 
 
-def render_grouped_by_status(tasks: list[JiraTask], title: str) -> str:
+def render_grouped_by_status(tasks: list[JiraTask], title: str) -> Text:
     """Группирует задачи по статусу в каноническом порядке (status.ORDER) и форматирует ответ.
 
     Неизвестные статусы идут последними (по алфавиту — для детерминизма вывода).
@@ -168,36 +136,39 @@ def render_grouped_by_status(tasks: list[JiraTask], title: str) -> str:
     rank = {name: i for i, name in enumerate(status.ORDER)}
     ordered = sorted(by_status, key=lambda s: (rank.get(s, len(status.ORDER)), s))
 
-    lines = [hbold(title), ""]
+    lines: list[Text | str] = [Bold(title), ""]
     for name in ordered:
-        lines.append(f"\n{hbold(name)}:")
+        lines.extend(["", Text(Bold(name), ":")])
         lines.extend(format_task(task) for task in by_status[name])
-    return "\n".join(lines)
+    return join_text(lines)
 
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     """Обработчик команды /start."""
-    await message.answer(
-        "🎫 <b>Jira Tasks Bot</b>\n\n"
-        "📋 <b>Просмотр задач:</b>\n"
-        "/inprog — Задачи в работе (In Progress)\n"
-        "/todo — Задачи в бэклоге\n"
-        "/waiting — Задачи в ожидании (Discussion / Hold)\n"
-        "/sprint — Задачи в активном спринте\n"
-        "/recent — Обновлённые за 24ч\n"
-        "/watching — Задачи, которые я отслеживаю\n"
-        "/byme — Созданные мной (назначены другим)\n"
-        "/stats — Статистика по задачам\n\n"
-        "🔔 <b>Уведомления:</b>\n"
-        "/sync [мин] — Включить уведомления (по умолчанию 30 мин)\n"
-        "/unsync — Отключить уведомления\n"
-        "/silent [user] — Отключить звук от пользователя\n"
-        "/unsilent [user] — Включить звук от пользователя\n\n"
-        "👥 <b>Слежение за коллегами:</b>\n"
-        "/track &lt;user&gt; [эмодзи] [мин] — Следить за задачами коллеги\n"
-        "/untrack &lt;user&gt; — Перестать следить\n"
-        "/tracks — Список отслеживаемых каналов"
+    await _answer_chunked(
+        message,
+        Text(
+            "🎫 ", Bold("Jira Tasks Bot"), "\n\n",
+            "📋 ", Bold("Просмотр задач:"), "\n",
+            "/inprog — Задачи в работе (In Progress)\n",
+            "/todo — Задачи в бэклоге\n",
+            "/waiting — Задачи в ожидании (Discussion / Hold)\n",
+            "/sprint — Задачи в активном спринте\n",
+            "/recent — Обновлённые за 24ч\n",
+            "/watching — Задачи, которые я отслеживаю\n",
+            "/byme — Созданные мной (назначены другим)\n",
+            "/stats — Статистика по задачам\n\n",
+            "🔔 ", Bold("Уведомления:"), "\n",
+            "/sync [мин] — Включить уведомления (по умолчанию 30 мин)\n",
+            "/unsync — Отключить уведомления\n",
+            "/silent [user] — Отключить звук от пользователя\n",
+            "/unsilent [user] — Включить звук от пользователя\n\n",
+            "👥 ", Bold("Слежение за коллегами:"), "\n",
+            "/track <user> [эмодзи] [мин] — Следить за задачами коллеги\n",
+            "/untrack <user> — Перестать следить\n",
+            "/tracks — Список отслеживаемых каналов",
+        ),
     )
 
 
@@ -211,9 +182,9 @@ async def cmd_inprog(message: Message) -> None:
         await message.answer("No tasks in 'In Progress' status.")
         return
 
-    lines = [hbold("My tasks in progress:"), ""]
+    lines: list[Text | str] = [Bold("My tasks in progress:"), ""]
     lines.extend(format_task(task) for task in tasks)
-    await _answer_chunked(message, "\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 @router.message(Command("sprint"))
@@ -239,9 +210,9 @@ async def cmd_byme(message: Message) -> None:
         await message.answer("No unresolved tasks created by you (assigned to others).")
         return
 
-    lines = [hbold("Tasks created by me (assigned to others):"), ""]
+    lines: list[Text | str] = [Bold("Tasks created by me (assigned to others):"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
-    await _answer_chunked(message, "\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 @router.message(Command("todo"))
@@ -254,9 +225,9 @@ async def cmd_todo(message: Message) -> None:
         await message.answer("No tasks in backlog (To Do / Backlog / Open).")
         return
 
-    lines = [hbold("My backlog tasks:"), ""]
+    lines: list[Text | str] = [Bold("My backlog tasks:"), ""]
     lines.extend(format_task(task) for task in tasks)
-    await _answer_chunked(message, "\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 @router.message(Command("waiting"))
@@ -269,9 +240,9 @@ async def cmd_waiting(message: Message) -> None:
         await message.answer("No tasks in Discussion / On Hold status.")
         return
 
-    lines = [hbold("Tasks waiting for decision:"), ""]
+    lines: list[Text | str] = [Bold("Tasks waiting for decision:"), ""]
     lines.extend(format_task(task, show_status=True) for task in tasks)
-    await _answer_chunked(message, "\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 @router.message(Command("recent"))
@@ -297,9 +268,9 @@ async def cmd_watching(message: Message) -> None:
         await message.answer("You are not watching any unresolved tasks (assigned to others).")
         return
 
-    lines = [hbold("Tasks I'm watching:"), ""]
+    lines: list[Text | str] = [Bold("Tasks I'm watching:"), ""]
     lines.extend(format_task(task, show_status=True, show_assignee=True) for task in tasks)
-    await _answer_chunked(message, "\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 @router.message(Command("stats"))
@@ -309,15 +280,15 @@ async def cmd_stats(message: Message) -> None:
     if stats is _FAILED:
         return
 
-    lines = [
-        hbold("📊 My task statistics:"),
+    lines: list[Text | str] = [
+        Bold("📊 My task statistics:"),
         "",
         f"🔵 In Progress: {stats.in_progress}",
         f"📋 Backlog: {stats.in_backlog}",
         f"✅ Resolved this week: {stats.resolved_this_week}",
         f"📌 Total open: {stats.total_assigned}",
     ]
-    await _answer_chunked(message, "\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 @router.message(Command("sync"))
@@ -386,13 +357,13 @@ TRACK_USAGE = "Usage: /track <jira-user> [эмодзи] [интервал]\nПр
 async def cmd_track(message: Message, command: CommandObject) -> None:
     """Обработчик /track - поднимает независимый канал слежения за задачами коллеги."""
     if not command.args:
-        await message.answer(TRACK_USAGE)
+        await _answer_chunked(message, TRACK_USAGE)
         return
 
     try:
         user, emoji, interval = parse_track_args(command.args)
     except ValueError:
-        await message.answer(f"Не разобрал аргументы.\n{TRACK_USAGE}")
+        await _answer_chunked(message, Text("Не разобрал аргументы.\n", TRACK_USAGE))
         return
 
     if user == PERSONAL:
@@ -405,8 +376,8 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
         await message.answer("Бот уже привязан к другому чату.")
         return
     if outcome.status == "probe_failed":
-        await message.answer(
-            f"⚠️ Не могу прочитать задачи '{user}'. Проверь Jira-имя и права бота."
+        await _answer_chunked(
+            message, Text("⚠️ Не могу прочитать задачи '", user, "'. Проверь Jira-имя и права бота.")
         )
         return
 
@@ -415,8 +386,12 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
         "сейчас 0 назначенных задач" if outcome.assigned_count == 0
         else f"{outcome.assigned_count} назначенных задач"
     )
-    await message.answer(
-        f"{channel.emoji} Слежу за '{user}' ({tail}). Интервал {channel.interval_minutes} мин."
+    await _answer_chunked(
+        message,
+        Text(
+            channel.emoji or "", " Слежу за '", user, "' (", tail,
+            f"). Интервал {channel.interval_minutes} мин.",
+        ),
     )
     # Немедленная первая проверка канала — ПОСЛЕ подтверждающего ответа
     await notification_service.check_now(user)
@@ -426,7 +401,7 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
 async def cmd_untrack(message: Message, command: CommandObject) -> None:
     """Обработчик /untrack - убирает канал слежения за коллегой."""
     if not command.args or not command.args.strip():
-        await message.answer("Usage: /untrack <jira-user>")
+        await _answer_chunked(message, "Usage: /untrack <jira-user>")
         return
 
     user = command.args.strip().split()[0]
@@ -438,9 +413,9 @@ async def cmd_untrack(message: Message, command: CommandObject) -> None:
         return
 
     if removed:
-        await message.answer(f"🚫 Больше не слежу за '{user}'.")
+        await _answer_chunked(message, Text("🚫 Больше не слежу за '", user, "'."))
     else:
-        await message.answer(f"'{user}' не отслеживается в этом чате.")
+        await _answer_chunked(message, Text("'", user, "' не отслеживается в этом чате."))
 
 
 @router.message(Command("tracks"))
@@ -449,22 +424,26 @@ async def cmd_tracks(message: Message) -> None:
     channels = notification_service.list_channels()
     colleagues = [c for c in channels if not c.is_personal]
     if not colleagues:
-        await message.answer(
-            "Нет отслеживаемых коллег.\nДобавить: /track <jira-user> [эмодзи] [интервал]"
+        await _answer_chunked(
+            message, "Нет отслеживаемых коллег.\nДобавить: /track <jira-user> [эмодзи] [интервал]"
         )
         return
 
-    lines = [hbold("Отслеживаемые каналы:"), ""]
+    lines: list[Text | str] = [Bold("Отслеживаемые каналы:"), ""]
     for channel in channels:
         if channel.is_personal:
-            lines.append(f"👤 <b>ты</b> (личный) — интервал {channel.interval_minutes} мин")
+            lines.append(
+                Text("👤 ", Bold("ты"), f" (личный) — интервал {channel.interval_minutes} мин")
+            )
         else:
             last = channel.last_check.strftime("%H:%M") if channel.last_check else "—"
             lines.append(
-                f"{channel.emoji} <b>{channel.user}</b> — интервал {channel.interval_minutes} мин, "
-                f"проверен {last} UTC"
+                Text(
+                    channel.emoji or "", " ", Bold(channel.user),
+                    f" — интервал {channel.interval_minutes} мин, проверен {last} UTC",
+                )
             )
-    await message.answer("\n".join(lines))
+    await _answer_chunked(message, join_text(lines))
 
 
 async def _resolve_target_user(message: Message, command: CommandObject) -> str | None:
@@ -481,9 +460,12 @@ async def _resolve_target_user(message: Message, command: CommandObject) -> str 
         await message.answer("⚠️ Could not determine your Jira username.")
         return None
     if not user:
-        await message.answer(
-            f"Could not determine your Jira username. "
-            f"Please specify it explicitly: {command.prefix}{command.command} username"
+        await _answer_chunked(
+            message,
+            Text(
+                "Could not determine your Jira username. Please specify it explicitly: ",
+                command.prefix, command.command, " username",
+            ),
         )
         return None
     return user
@@ -497,11 +479,13 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
         return
 
     if notification_service.is_user_silent(target_user):
-        await message.answer(f"Messages from '{target_user}' are already silent (Sound OFF).")
+        await _answer_chunked(
+            message, Text("Messages from '", target_user, "' are already silent (Sound OFF).")
+        )
         return
 
     await notification_service.mute_user(target_user)
-    await message.answer(f"🔕 Sound OFF for messages from '{target_user}'.")
+    await _answer_chunked(message, Text("🔕 Sound OFF for messages from '", target_user, "'."))
 
 
 @router.message(Command("unsilent"))
@@ -512,8 +496,10 @@ async def cmd_unsilent(message: Message, command: CommandObject) -> None:
         return
 
     if not notification_service.is_user_silent(target_user):
-        await message.answer(f"Messages from '{target_user}' are already audible (Sound ON).")
+        await _answer_chunked(
+            message, Text("Messages from '", target_user, "' are already audible (Sound ON).")
+        )
         return
 
     await notification_service.unmute_user(target_user)
-    await message.answer(f"🔔 Sound ON for messages from '{target_user}'.")
+    await _answer_chunked(message, Text("🔔 Sound ON for messages from '", target_user, "'."))

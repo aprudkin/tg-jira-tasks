@@ -137,5 +137,6 @@ async def test_shared_issue_notifies_each_channel_independently(state_path, fake
     assert "comment_1" in s._channels[nots.PERSONAL].processed_events["ABC-1"]
     assert "comment_1" in s._channels["jdoe"].processed_events["ABC-1"]
     # Уведомление канала коллеги несёт его маркер
-    last_text = s._bot.send_message.await_args.args[1]
+    last_text = s._bot.send_message.await_args.kwargs["text"]
     assert "🔵" in last_text
+    assert s._bot.send_message.await_args.kwargs["parse_mode"] is None

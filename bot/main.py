@@ -2,8 +2,6 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
 from bot.config import settings
@@ -41,10 +39,7 @@ BOT_COMMANDS = [
 async def main() -> None:
     """Точка входа в приложение."""
     # Создание бота с настройками по умолчанию
-    bot = Bot(
-        token=settings.telegram_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    bot = Bot(token=settings.telegram_token)
     dp = Dispatcher()
 
     # Регистрация команд в меню Telegram

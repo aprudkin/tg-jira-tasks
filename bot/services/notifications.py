@@ -7,10 +7,10 @@ from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.utils.markdown import hbold
+from aiogram.utils.formatting import Bold, Text
 
 from bot.config import settings
-from bot.render import issue_ref
+from bot.render import issue_ref, split_message
 from bot.services.jira import jira_service, JiraEvent, utc_now_naive
 from bot.status import CLOSED_GROUP
 
@@ -543,37 +543,38 @@ class NotificationService:
             await self._send_one(chat_id, event, marker)
 
     async def _send_one(self, chat_id: int, event: JiraEvent, marker: str | None = None) -> None:
-        """Отправляет одно событие с retry на TelegramRetryAfter (HTTP 429)."""
-        for attempt in range(2):
-            try:
-                await self._bot.send_message(
-                    chat_id,
-                    self._format_event(event, marker),
-                    disable_notification=event.author_id in self._silent_users,
-                )
-                return
-            except TelegramRetryAfter as e:
-                if attempt == 0:
-                    logger.warning(f"Telegram rate-limit, sleeping {e.retry_after}s")
-                    await asyncio.sleep(e.retry_after)
-                    continue
-                logger.error(f"Rate-limited twice for chat {chat_id}, dropping event {event.id}")
-            except Exception:
-                logger.exception(f"Error sending notification to {chat_id}")
-                return
+        """Отправляет фрагменты одного события с retry только неотправленного фрагмента."""
+        for chunk in split_message(self._format_event(event, marker)):
+            for attempt in range(2):
+                try:
+                    await self._bot.send_message(
+                        chat_id,
+                        **chunk.as_kwargs(),
+                        disable_notification=event.author_id in self._silent_users,
+                    )
+                    break
+                except TelegramRetryAfter as e:
+                    if attempt == 0:
+                        logger.warning(f"Telegram rate-limit, sleeping {e.retry_after}s")
+                        await asyncio.sleep(e.retry_after)
+                        continue
+                    logger.error(f"Rate-limited twice for chat {chat_id}, dropping event {event.id}")
+                    return
+                except Exception:
+                    logger.exception(f"Error sending notification to {chat_id}")
+                    return
 
-    def _format_event(self, event: JiraEvent, marker: str | None = None) -> str:
+    def _format_event(self, event: JiraEvent, marker: str | None = None) -> Text:
         """Форматирует событие. marker (эмодзи канала коллеги) идёт впереди event-type иконки."""
         icon = EVENT_ICONS.get(event.event_type, "📌")
         title = EVENT_TITLES.get(event.event_type, "Обновление")
         header = f"{marker} {icon}" if marker else icon
-        lines = [
-            f"{header} {hbold(title)}",
-            issue_ref(event.issue_key, event.issue_url, event.issue_summary),
-            f"От: {event.author}",
-            f"{event.details}",
-        ]
-        return "\n".join(lines)
+        return Text(
+            header, " ", Bold(title), "\n",
+            issue_ref(event.issue_key, event.issue_url, event.issue_summary), "\n",
+            "От: ", event.author, "\n",
+            event.details,
+        )
 
 
 # Глобальный экземпляр сервиса уведомлений
