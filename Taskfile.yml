@@ -39,9 +39,9 @@ tasks:
       - echo "Bot stack is ready."
 
   test:
-    desc: Run pytest (тесты для чистых утилит)
+    desc: Run the full pytest suite in the locked uv environment
     cmds:
-      - python3 -m pytest tests/ -v
+      - uv run --locked --group dev python -m pytest tests/ -v
 
   status:
     desc: Show status of the bot stack

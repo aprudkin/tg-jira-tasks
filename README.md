@@ -5,6 +5,7 @@ Telegram-бот для работы с Jira. Показывает задачи, 
 ## Требования
 
 - Docker
+- [uv](https://docs.astral.sh/uv/) для локальной разработки
 - Telegram Bot Token (от [@BotFather](https://t.me/BotFather))
 - Jira API Token (для Cloud) или Personal Access Token (для Data Center/Server)
 
@@ -131,6 +132,15 @@ Telegram-бот (aiogram 3.x), который интегрируется с Jira
 Подробнее см. [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Разработка
+
+Зависимости проекта и их точные версии определяют `pyproject.toml` и `uv.lock`. Чтобы подготовить локальное окружение и запустить полный набор тестов:
+
+```bash
+uv sync --locked --group dev
+task test
+```
+
+В новом worktree первый запуск может загрузить CPython 3.11 и зафиксированные пакеты, если их нет в кэше uv. Каталог `.venv` создаётся отдельно для каждого worktree, не отслеживается Git и при необходимости пересоздаётся.
 
 Правила разработки для агентов описаны в файле [AGENTS.md](AGENTS.md), а устройство проекта — в [ARCHITECTURE.md](ARCHITECTURE.md).
 
