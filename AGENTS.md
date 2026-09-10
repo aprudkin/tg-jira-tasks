@@ -1,101 +1,68 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Repository
 
-## Core Instructions
+Telegram bot built with **aiogram 3.x** that fetches Jira tasks for Telegram users.
 
-### Investigate Before Answering
+- `bot/main.py`: entry point; configures the aiogram `Dispatcher`, middleware, and routers.
+- `bot/config.py`: `pydantic-settings` configuration loaded from environment variables.
+- `bot/services/jira.py`: `JiraService`, wrapping `jira-python` and using JQL queries.
+- `bot/services/notifications.py`: background notification service with persistent state.
+- `bot/handlers/tasks.py`: command handlers using the aiogram `Router` pattern.
+- `bot/middlewares/auth.py`: Telegram-user whitelist middleware.
 
-Never speculate about code you have not opened. If the user refers to a specific file, you MUST read that file before answering. Always investigate and read all relevant files BEFORE answering questions about the codebase. Never make assertions about code without investigation; if unsure about the correct answer, provide well-founded responses and clearly state any uncertainty instead of hallucinating.
+Request flow: user command → `AuthMiddleware` whitelist check → handler → `JiraService` → response.
 
-### Do Not Act Before Instructions
+Code comments must be written in Russian. New `.ps1` files must use UTF-8 with BOM (`utf8bom`) encoding. After changes, create a commit following Conventional Commits.
 
-Never modify or create code, files, commits, configuration, or tests unless the user has explicitly requested it. If instructions are ambiguous or allow multiple interpretations, ALWAYS ask clarifying questions before taking action.
-
-### Use Context7
-
-Always use context7 when I need code generation, setup or configuration steps, or library/API documentation. This means you should automatically use the Context7 MCP tools to resolve library id and get library docs without me having to explicitly ask.
-
-### Comments in Russian
-
-All comments in the code must be written in Russian.
-
-### PowerShell File Encoding
-
-Encoding for all new `.ps1` files must be UTF-8 with BOM (utf8bom).
-
-### Commit After Changes
-
-After all changes, create a commit following Conventional Commits rules.
-
-### Do Not Commit AI Agent Files
-
-Never commit files intended for AI agents. These files are in `.gitignore` and must remain local:
-- `CLAUDE.md` - Instructions for Claude Code
-- `ANTIGRAVITY.md` - Development rules
-- Any other `*CLAUDE*`, `*CURSOR*`, `*COPILOT*` or similar AI-specific files
-
-When updating these files, do NOT run `git add` on them.
-
-## Build and Run Commands
+## Build and Run
 
 ```bash
-# Build Docker image
+# Build the Docker image
 docker build -t tg-jira-bot .
 
-# Run with environment file
+# Run using the environment file
 docker run --env-file .env tg-jira-bot
 
-# Run with docker-compose
+# Build and run with Compose
 docker-compose up --build
 ```
 
-## Architecture
+## Configuration
 
-Telegram bot (aiogram 3.x) that integrates with Jira to fetch user's tasks.
+Required `.env` configuration is documented in `.env.example`:
 
-**Key components:**
-- `bot/main.py` - Entry point, configures Dispatcher with middleware and routers
-- `bot/config.py` - Settings via pydantic-settings, loads from environment variables
-- `bot/services/jira.py` - JiraService class wrapping jira-python library, uses JQL queries
-- `bot/services/notifications.py` - Background notification service with persistent state
-- `bot/handlers/tasks.py` - Command handlers (Router pattern from aiogram)
-- `bot/middlewares/auth.py` - Telegram user whitelist middleware
+- `TELEGRAM_TOKEN`: bot token from `@BotFather`.
+- `JIRA_URL`: Jira server URL.
+- `JIRA_EMAIL`: Jira account email; optional when using PAT authentication.
+- `JIRA_API_TOKEN`: Jira API token; optional when using PAT authentication.
+- `JIRA_PAT`: Jira Personal Access Token for Jira Data Center/Server.
+- `ALLOWED_USERS`: comma-separated Telegram user IDs; empty allows all users.
 
-**Flow:** User command → AuthMiddleware (whitelist check) → Handler → JiraService → Response
+## Task Notifications and Grouping
 
-**Notifications:**
-- `/sync` monitors tasks where user is: assignee, reporter, or watcher
-- Events tracked: comments, status changes, assignments to user
-- First check runs 5 seconds after subscription (not waiting for full interval)
-- State persists in `/app/data/sync_state.json` (Docker volume `bot_data`)
-- Event deduplication via unique IDs per task
-- Auto-cleanup when tasks are closed
+The bot serves one subscribed chat. `/sync` manages its personal sync channel, which monitors issues where the bot's Jira account is assignee, reporter, or watcher. `/track` manages colleague sync channels, which monitor assignee issues only.
 
-**Grouping:**
-- `/sprint` groups tasks by status: In Progress → Discussion → Hold → Backlog → Resolved
-- `/recent` groups tasks by priority: In Progress → Reopened → Discussion → On Hold → Resolved → Closed
+- Every sync channel has an independent interval, UTC cursor, marker emoji, on/off state, and event-deduplication history.
+- A new colleague channel is checked immediately after the `/track` confirmation. The background loop's first scheduled poll runs 5 seconds after the channel starts.
+- Persistent state is `/app/data/sync_state.json`; Docker Compose stores it in the `bot_data` volume.
+- Events are deduplicated per channel. The same event on an overlapping issue may intentionally produce one notification from each matching channel.
+- Event-deduplication history is cleaned up when issues enter the closed status group.
 
-## Environment Variables
+`/sprint` and `/recent` group tasks by status using the canonical order in `bot/status.py`. Unknown statuses are sorted last.
 
-Required in `.env` (see `.env.example`):
-- `TELEGRAM_TOKEN` - Bot token from @BotFather
-- `JIRA_URL` - Jira server URL
-- `JIRA_EMAIL` - Jira account email (Optional if PAT used)
-- `JIRA_API_TOKEN` - Jira API token (Optional if PAT used)
-- `JIRA_PAT` - Jira Personal Access Token (For Data Center/Server)
-- `ALLOWED_USERS` - Comma-separated Telegram user IDs (empty = allow all)
+## Issue Tracking and Domain Documentation
 
-## Agent skills
+Issues and PRDs are maintained in this repository's GitHub Issues tracker (`aprudkin/tg-jira-tasks`). Treat a request to create or file an issue as authorization to create it there. External PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
 
-### Issue tracker
+Canonical triage labels, created in this repository on first use:
 
-Issues/PRDs live in the shared aimem tracker (`aprudkin/aimem` GitHub Issues, via `gh -R aprudkin/aimem`), scoped to this repo by `project:tg-jira-tasks`. External PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+- `needs-triage`
+- `needs-info`
+- `ready-for-agent`
+- `ready-for-human`
+- `wontfix`
 
-### Triage labels
+See `docs/agents/triage-labels.md`.
 
-Five canonical state labels (needs-triage / needs-info / ready-for-agent / ready-for-human / wontfix), created in aimem on first use. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root, created lazily. See `docs/agents/domain.md`.
+Domain documentation uses one root `CONTEXT.md` and `docs/adr/`, created lazily. See `docs/agents/domain.md`.

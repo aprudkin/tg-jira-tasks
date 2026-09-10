@@ -205,60 +205,24 @@ Benefits:
 
 ### Background Tasks
 
-Notification service uses `asyncio.Task` for polling:
+The notification service models each tracked user as an independent sync channel. A channel owns its polling interval, UTC cursor, marker emoji, on/off state, per-issue event IDs, and polling lock. The personal channel monitors issues where `currentUser()` is assignee, reporter, or watcher; colleague channels monitor assignee issues only.
 
-```python
-def start(self, bot: Bot) -> None:
-    self._task = asyncio.create_task(self._check_loop())
+`NotificationService.start()` creates one `asyncio.Task` per active channel. A newly tracked colleague is checked immediately after the `/track` confirmation; the background loop schedules its first poll after five seconds. Later polls use the channel's configured interval. Shutdown cancels and awaits every channel task.
 
-async def _check_loop(self) -> None:
-    first_check = True
-    while True:
-        if first_check:
-            await asyncio.sleep(5)  # Immediate check after subscription
-            first_check = False
-        else:
-            await asyncio.sleep(self._interval_minutes * 60)
-        await self._check_notifications()
-```
+Each successful poll uses the half-open UTC window `(last_check, window_end]`. The service captures `window_end` before requesting Jira data and advances the cursor only after fetching and processing complete without an exception. See ADR-0001 through ADR-0003 for channel independence, per-channel deduplication, and UTC-window semantics.
 
-Graceful async shutdown:
+**Events monitored:**
 
-```python
-async def stop(self) -> None:
-    if self._task and not self._task.done():
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-```
-
-**Events monitored** (via JQL `assignee OR reporter OR watcher`):
-- New comments (on open tasks only)
-- Status changes
-- Assignments to current user
+- issue creation;
+- new comments;
+- status changes;
+- assignments to the tracked user.
 
 ### State Persistence
 
-Subscription state is saved to JSON file for survival across restarts:
+The JSON state contains the subscribed chat, all channel definitions, each channel's per-issue event IDs, and the cross-channel set of muted authors. Writes use a temporary file followed by an atomic replacement. Loading also migrates the former flat schema into the personal `__me__` channel.
 
-```python
-STATE_FILE = Path("/app/data/sync_state.json")
-
-def _save_state(self) -> None:
-    data = {"chat_id": self._chat_id, "interval_minutes": self._interval_minutes}
-    STATE_FILE.write_text(json.dumps(data))
-
-def _load_state(self) -> None:
-    if STATE_FILE.exists():
-        data = json.loads(STATE_FILE.read_text())
-        self._chat_id = data.get("chat_id")
-        self._interval_minutes = data.get("interval_minutes")
-        self._last_check = datetime.now()  # Avoid sending old notifications
-```
-
-Docker volume `bot_data` is mounted to `/app/data` for persistence.
+`last_check` is not persisted. Restored channels receive a fresh UTC baseline so that restart does not replay old events. Docker Compose mounts the `bot_data` volume at `/app/data`, where the default state path is `/app/data/sync_state.json`.
 
 ## Security
 
@@ -285,17 +249,9 @@ Empty whitelist = allow all (development mode).
 
 ## Testing Strategy
 
-### Unit Tests
+The local suite uses pytest with fakes and mocks; it does not require live Jira or Telegram access. Shared fixtures inject dummy configuration values before application modules are imported and isolate notification state in temporary paths.
 
-- Mock `jira_service` in handler tests
-- Test JQL queries via service method calls
-- Test middleware with fake events
-
-### Integration Tests
-
-- Use test Jira project
-- Verify actual API responses
-- Test notification polling
+The suite covers handlers and rendering, Jira client initialization and pagination contracts, sync-channel lifecycle and polling, per-channel deduplication, atomic state persistence and migration, UTC event windows, and status ordering. Run the complete suite from the repository root with `task test`.
 
 ## Extending the Bot
 

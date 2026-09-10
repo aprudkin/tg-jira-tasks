@@ -38,8 +38,6 @@ rsync -avz --delete \
   --exclude='.claude/' \
   --exclude='.mcp.json' \
   --exclude='.DS_Store' \
-  --exclude='CLAUDE.md' \
-  --exclude='ANTIGRAVITY.md' \
   --exclude='tasks/' \
   --exclude='.env' \
   --exclude='*.pyc' \

@@ -132,7 +132,7 @@ Telegram-бот (aiogram 3.x), который интегрируется с Jira
 
 ## Разработка
 
-Правила разработки и архитектурные детали описаны в файле [ANTIGRAVITY.md](ANTIGRAVITY.md).
+Правила разработки для агентов описаны в файле [AGENTS.md](AGENTS.md), а устройство проекта — в [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Лицензия
 
