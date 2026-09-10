@@ -10,7 +10,7 @@ from aiogram.utils.formatting import Bold, Text
 
 from bot import status
 from bot.render import issue_ref, join_text, split_message
-from bot.services.jira import jira_service, JiraTask
+from bot.services.jira import IncompleteJiraDataError, jira_service, JiraTask
 from bot.services.notifications import notification_service, PERSONAL, StateSaveError
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ router = Router()
 
 # Сообщение пользователю при ошибке Jira (детали — только в логах с exc_info)
 JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
+JIRA_INCOMPLETE_MESSAGE = "⚠️ Jira returned too much data to show safely. No partial result was shown."
 
 # Текст loading-сообщения для большинства команд
 LOADING_TASKS = "Loading tasks..."
@@ -116,6 +117,10 @@ async def _safe_fetch(message: Message, loading_text: str, fetch):
     loading_msg = await message.answer(loading_text)
     try:
         return await fetch()
+    except IncompleteJiraDataError:
+        logger.exception("Jira call returned incomplete data")
+        await message.answer(JIRA_INCOMPLETE_MESSAGE)
+        return _FAILED
     except Exception:
         logger.exception("Jira call failed")
         await message.answer(JIRA_ERROR_MESSAGE)

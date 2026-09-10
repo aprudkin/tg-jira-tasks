@@ -5,11 +5,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from jira import JIRA
+from jira.resources import dict2resource
 
 from bot import status
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class IncompleteJiraDataError(RuntimeError):
+    """Jira не позволила получить полный результат в безопасных пределах."""
 
 
 def utc_now_naive() -> datetime:
@@ -76,8 +81,14 @@ class JiraStats:
 class JiraService:
     """Сервис для работы с Jira API."""
 
-    # Максимальное количество задач для выборки
-    MAX_RESULTS = 100
+    # Размер страницы ограничивает один запрос, лимиты — память и число продолжений.
+    PAGE_SIZE = 100
+    INTERACTIVE_RESULT_LIMIT = 500
+    EVENT_ISSUE_LIMIT = 2_000
+    HISTORY_LIMIT_PER_ISSUE = 5_000
+    HISTORY_LIMIT_PER_POLL = 20_000
+    SEARCH_PAGE_LIMIT = 100
+    HISTORY_PAGE_LIMIT = 100
 
     def __init__(self) -> None:
         self._client: JIRA | None = None
@@ -205,16 +216,121 @@ class JiraService:
         """
         return await asyncio.to_thread(self._count_issues, f'assignee = "{user}"')
 
+    @staticmethod
+    def _stable_jql(jql: str) -> str:
+        """Добавляет неизменяемый tie-breaker к сортировке между страницами."""
+        if "ORDER BY" in jql.upper():
+            return f"{jql}, key ASC"
+        return f"{jql} ORDER BY key ASC"
+
+    def _search_issue_pages(
+        self,
+        jql: str,
+        *,
+        fields: list[str],
+        limit: int,
+        expand: str | None = None,
+    ) -> list:
+        """Читает Cloud token-pages или DC offset-pages, не возвращая неполный результат."""
+        jql = self._stable_jql(jql)
+        issues: list = []
+        seen_keys: set[str] = set()
+        raw_count = 0
+
+        if getattr(self.client, "_is_cloud", False) is True:
+            token: str | None = None
+            seen_tokens: set[str] = set()
+            page_count = 0
+            while True:
+                page_count += 1
+                if page_count > self.SEARCH_PAGE_LIMIT:
+                    raise IncompleteJiraDataError("Jira search exceeded the page request limit")
+                page = self.client.enhanced_search_issues(
+                    jql,
+                    nextPageToken=token,
+                    fields=fields,
+                    maxResults=self.PAGE_SIZE,
+                    expand=expand,
+                )
+                page_items = list(page)
+                raw_count += len(page_items)
+                if raw_count > limit:
+                    raise IncompleteJiraDataError(f"Jira search exceeded {limit} issues")
+                added = 0
+                for issue in page_items:
+                    if issue.key not in seen_keys:
+                        seen_keys.add(issue.key)
+                        issues.append(issue)
+                        added += 1
+
+                next_token = getattr(page, "nextPageToken", None)
+                if not next_token:
+                    return issues
+                if not page_items or added == 0:
+                    raise IncompleteJiraDataError("Jira search page did not add any issues")
+                if next_token == token or next_token in seen_tokens:
+                    raise IncompleteJiraDataError("Jira search returned a repeated page token")
+                seen_tokens.add(next_token)
+                token = next_token
+
+        start_at = 0
+        page_count = 0
+        while True:
+            page_count += 1
+            if page_count > self.SEARCH_PAGE_LIMIT:
+                raise IncompleteJiraDataError("Jira search exceeded the page request limit")
+            page = self.client.search_issues(
+                jql,
+                startAt=start_at,
+                fields=fields,
+                maxResults=self.PAGE_SIZE,
+                expand=expand,
+            )
+            page_items = list(page)
+            response_start = getattr(page, "startAt", start_at)
+            if response_start != start_at:
+                raise IncompleteJiraDataError("Jira search returned a non-advancing offset")
+
+            raw_count += len(page_items)
+            if raw_count > limit:
+                raise IncompleteJiraDataError(f"Jira search exceeded {limit} issues")
+            added = 0
+            for issue in page_items:
+                if issue.key not in seen_keys:
+                    seen_keys.add(issue.key)
+                    issues.append(issue)
+                    added += 1
+
+            total = getattr(page, "total", None)
+            if not page_items:
+                if total is not None and start_at < total:
+                    raise IncompleteJiraDataError("Jira search returned an empty page before total")
+                return issues
+            if getattr(page, "isLast", False) is True:
+                return issues
+            if added == 0:
+                raise IncompleteJiraDataError("Jira search page did not add any issues")
+
+            next_start = start_at + len(page_items)
+            response_size = getattr(page, "maxResults", None) or self.PAGE_SIZE
+            # ResultList подставляет len(page), когда сервер не прислал total.
+            # Поэтому полную страницу всегда подтверждаем ещё одним запросом.
+            if len(page_items) < response_size and (total is None or next_start >= total):
+                return issues
+            if next_start <= start_at:
+                raise IncompleteJiraDataError("Jira search offset did not advance")
+            start_at = next_start
+
     def _search_issues(self, jql: str, include_assignee: bool = False) -> list[JiraTask]:
-        """Выполняет поиск задач и возвращает список объектов JiraTask."""
+        """Выполняет полный ограниченный поиск задач и возвращает JiraTask."""
         fields = ["key", "summary", "status"]
         if include_assignee:
             fields.append("assignee")
 
-        issues = self.client.search_issues(
+        issues = self._search_issue_pages(
             jql,
             fields=fields,
-            maxResults=self.MAX_RESULTS,
+            limit=self.INTERACTIVE_RESULT_LIMIT,
         )
 
         return [
@@ -265,12 +381,13 @@ class JiraService:
             assign_target = target
             jql = f'assignee = "{target}" AND updated >= "{since_str}" ORDER BY updated DESC'
 
-        issues = self.client.search_issues(
+        issues = self._search_issue_pages(
             jql,
             fields=["key", "summary", "status", "comment", "assignee", "created", "reporter"],
-            maxResults=self.MAX_RESULTS,
+            limit=self.EVENT_ISSUE_LIMIT,
             expand="changelog",
         )
+        history_count = 0
 
         for issue in issues:
             issue_url = f"{settings.jira_url}/browse/{issue.key}"
@@ -300,8 +417,12 @@ class JiraService:
 
             # Проверяем комментарии (только для открытых задач)
             is_closed = issue.fields.status.name in status.CLOSED_GROUP
+            comments = []
             if hasattr(issue.fields, "comment") and issue.fields.comment and not is_closed:
-                for comment in issue.fields.comment.comments:
+                comments = self._complete_comments(issue)
+                history_count += len(comments)
+                self._check_poll_history_limit(history_count)
+                for comment in comments:
                     comment_created = self._parse_jira_datetime(comment.created)
                     # Пропускаем события с некорректной датой или старые
                     if comment_created is None or comment_created <= since:
@@ -327,7 +448,10 @@ class JiraService:
 
             # Проверяем changelog на изменения статуса и назначения
             if hasattr(issue, "changelog") and issue.changelog:
-                for history in issue.changelog.histories:
+                histories = self._complete_changelog(issue)
+                history_count += len(histories)
+                self._check_poll_history_limit(history_count)
+                for history in histories:
                     history_created = self._parse_jira_datetime(history.created)
                     # Пропускаем события с некорректной датой или старые
                     if history_created is None or history_created <= since:
@@ -368,9 +492,125 @@ class JiraService:
                                 timestamp=history_created,
                             ))
 
-        # Сортируем по времени
-        events.sort(key=lambda e: e.timestamp)
-        return events
+        # Повтор на границе страниц не должен порождать два события в одном опросе.
+        unique_events = {(event.issue_key, event.id): event for event in events}
+        return sorted(unique_events.values(), key=lambda event: (event.timestamp, event.issue_key, event.id))
+
+    @staticmethod
+    def _embedded_page_is_incomplete(container, items: list) -> bool:
+        """Проверяет усечение embedded-коллекции по Jira pagination metadata."""
+        total = getattr(container, "total", None)
+        start_at = getattr(container, "startAt", 0)
+        return total is not None and start_at + len(items) < total
+
+    def _complete_comments(self, issue) -> list:
+        """Возвращает полные комментарии либо завершает весь опрос ошибкой."""
+        container = issue.fields.comment
+        embedded = list(container.comments)
+        has_raw = isinstance(getattr(issue, "raw", None), dict)
+        incomplete = self._embedded_page_is_incomplete(container, embedded)
+        total = getattr(container, "total", None)
+        if len(embedded) > self.HISTORY_LIMIT_PER_ISSUE or (
+            total is not None and total > self.HISTORY_LIMIT_PER_ISSUE
+        ):
+            raise IncompleteJiraDataError(
+                f"Comments for {issue.key} exceeded {self.HISTORY_LIMIT_PER_ISSUE} records"
+            )
+        if total is not None and not incomplete:
+            return embedded
+        if total is None and not has_raw:
+            return embedded
+        return self._fetch_offset_history(issue.key, "comment", "comments")
+
+    def _complete_changelog(self, issue) -> list:
+        """Возвращает полный changelog; DC с доказанным усечением блокирует cursor."""
+        container = issue.changelog
+        embedded = list(container.histories)
+        has_raw = isinstance(getattr(issue, "raw", None), dict)
+        incomplete = self._embedded_page_is_incomplete(container, embedded)
+        total = getattr(container, "total", None)
+        if len(embedded) > self.HISTORY_LIMIT_PER_ISSUE or (
+            total is not None and total > self.HISTORY_LIMIT_PER_ISSUE
+        ):
+            raise IncompleteJiraDataError(
+                f"Changelog for {issue.key} exceeded {self.HISTORY_LIMIT_PER_ISSUE} records"
+            )
+        if total is not None and not incomplete:
+            return embedded
+        if total is None and not has_raw:
+            return embedded
+
+        if getattr(self.client, "_is_cloud", False) is True:
+            return self._fetch_offset_history(issue.key, "changelog", "values")
+        raise IncompleteJiraDataError(
+            f"Changelog for {issue.key} is truncated and Jira Data Center has no supported continuation"
+        )
+
+    def _fetch_offset_history(self, issue_key: str, resource: str, items_key: str) -> list:
+        """Читает offset-pages history через изолированный raw REST adapter."""
+        items: list = []
+        seen_ids: set[str] = set()
+        start_at = 0
+        page_count = 0
+        while True:
+            page_count += 1
+            if page_count > self.HISTORY_PAGE_LIMIT:
+                raise IncompleteJiraDataError(
+                    f"{resource} for {issue_key} exceeded the page request limit"
+                )
+            response = self.client._get_json(
+                f"issue/{issue_key}/{resource}",
+                params={"startAt": start_at, "maxResults": self.PAGE_SIZE},
+            )
+            if not isinstance(response, dict) or not isinstance(response.get(items_key), list):
+                raise IncompleteJiraDataError(f"Malformed {resource} page for {issue_key}")
+            response_start = response.get("startAt", start_at)
+            if response_start != start_at:
+                raise IncompleteJiraDataError(f"Non-advancing {resource} page for {issue_key}")
+
+            raw_items = response[items_key]
+            if start_at + len(raw_items) > self.HISTORY_LIMIT_PER_ISSUE:
+                raise IncompleteJiraDataError(
+                    f"{resource} for {issue_key} exceeded {self.HISTORY_LIMIT_PER_ISSUE} records"
+                )
+            added = 0
+            for raw_item in raw_items:
+                item_id = str(raw_item.get("id", ""))
+                if item_id and item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    items.append(dict2resource(
+                        raw_item,
+                        options=self.client._options,
+                        session=self.client._session,
+                    ))
+                    added += 1
+
+            next_start = start_at + len(raw_items)
+            total = response.get("total")
+            page_size = response.get("maxResults", self.PAGE_SIZE)
+            if not raw_items:
+                if total is not None and start_at < total:
+                    raise IncompleteJiraDataError(
+                        f"Empty {resource} page before total for {issue_key}"
+                    )
+                return items
+            if total is not None and next_start >= total:
+                return items
+            if added == 0:
+                raise IncompleteJiraDataError(
+                    f"{resource} page did not add any records for {issue_key}"
+                )
+            if total is None and len(raw_items) < page_size:
+                return items
+            if next_start <= start_at:
+                raise IncompleteJiraDataError(f"{resource} offset did not advance for {issue_key}")
+            start_at = next_start
+
+    def _check_poll_history_limit(self, count: int) -> None:
+        if count > self.HISTORY_LIMIT_PER_POLL:
+            raise IncompleteJiraDataError(
+                f"Jira history exceeded {self.HISTORY_LIMIT_PER_POLL} records in one poll"
+            )
 
     def _parse_jira_datetime(self, dt_str: str) -> datetime | None:
         """Парсит строку даты из Jira API.

@@ -3,7 +3,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bot.handlers.tasks import _safe_fetch, _FAILED, JIRA_ERROR_MESSAGE
+from bot.handlers.tasks import (
+    _safe_fetch,
+    _FAILED,
+    JIRA_ERROR_MESSAGE,
+    JIRA_INCOMPLETE_MESSAGE,
+)
+from bot.services.jira import IncompleteJiraDataError
 
 
 def _message_mock():
@@ -36,6 +42,17 @@ async def test_safe_fetch_returns_failed_sentinel_on_exception():
     assert result is _FAILED
     # Loading + JIRA_ERROR_MESSAGE
     assert any(c.args == (JIRA_ERROR_MESSAGE,) for c in msg.answer.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_safe_fetch_reports_incomplete_result_explicitly():
+    msg, _ = _message_mock()
+    fetch = AsyncMock(side_effect=IncompleteJiraDataError("limit with internal details"))
+
+    result = await _safe_fetch(msg, "Loading...", fetch)
+
+    assert result is _FAILED
+    assert any(c.args == (JIRA_INCOMPLETE_MESSAGE,) for c in msg.answer.await_args_list)
 
 
 @pytest.mark.asyncio
