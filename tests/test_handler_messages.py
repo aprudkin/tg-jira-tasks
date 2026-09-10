@@ -6,6 +6,8 @@ from aiogram.filters import CommandObject
 import pytest
 
 import bot.handlers.tasks as tasks
+import bot.services.jira as jira_module
+from bot.services.jira import JiraService
 from bot.services.notifications import Channel
 
 
@@ -50,6 +52,22 @@ async def test_untrack_usage_is_plain_valid_text():
     call = message.answer.await_args
     assert call.kwargs["text"] == "Usage: /untrack <jira-user>"
     assert call.kwargs["parse_mode"] is None
+
+
+@pytest.mark.asyncio
+async def test_silent_without_user_handles_jira_initialization_error(monkeypatch):
+    """Ошибка холодного старта Jira должна давать безопасный общий ответ."""
+    message = _message()
+
+    def failed_constructor(**kwargs):
+        raise RuntimeError("connection failed")
+
+    monkeypatch.setattr(jira_module, "JIRA", failed_constructor)
+    monkeypatch.setattr(tasks, "jira_service", JiraService())
+
+    await tasks.cmd_silent(message, _command("silent"))
+
+    message.answer.assert_awaited_once_with("⚠️ Could not determine your Jira username.")
 
 
 @pytest.mark.asyncio

@@ -350,7 +350,11 @@ class JiraService:
 
     async def get_current_user(self) -> str:
         """Возвращает имя текущего пользователя Jira."""
-        return await asyncio.to_thread(self.client.current_user)
+        return await asyncio.to_thread(self._get_current_user_sync)
+
+    def _get_current_user_sync(self) -> str:
+        """Создаёт клиент при необходимости и получает пользователя в рабочем потоке."""
+        return self.client.current_user()
 
     async def get_events_since(
         self,
