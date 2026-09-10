@@ -93,14 +93,20 @@ async def test_reopen_does_not_clear_dedup_history(svc, fake_jira):
 
 
 @pytest.mark.asyncio
-async def test_last_check_advances_even_when_no_events(svc, fake_jira):
+async def test_last_check_advances_to_prefetch_window_end(svc, fake_jira, monkeypatch):
     initial = _me(svc).last_check
+    window_end = datetime(2026, 1, 1, 12, 5, 0, 123456)
+    monkeypatch.setattr(nots, "utc_now_naive", lambda: window_end)
     fake_jira.get_events_since.return_value = []
 
     await svc.check_now()
 
-    assert _me(svc).last_check is not None
-    assert _me(svc).last_check > initial
+    fake_jira.get_events_since.assert_awaited_once_with(
+        initial,
+        None,
+        until=window_end,
+    )
+    assert _me(svc).last_check == window_end
     svc._bot.send_message.assert_not_awaited()
 
 

@@ -25,7 +25,7 @@ def _evt(issue_key: str, event_id: str) -> JiraEvent:
 
 @pytest.mark.asyncio
 async def test_two_channel_loops_tick_deliver_and_persist(state_path):
-    async def fake_events(since, target=None):
+    async def fake_events(since, target=None, *, until=None):
         if target is None:
             return [_evt("ME-1", "e_me")]
         return [_evt("JD-1", "e_jd")]
@@ -61,7 +61,7 @@ async def test_untrack_drains_direct_check_without_late_notification(state_path)
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
 
-    async def blocked_events(since, target=None):
+    async def blocked_events(since, target=None, *, until=None):
         fetch_started.set()
         await release_fetch.wait()
         return [_evt("JD-1", "late")]

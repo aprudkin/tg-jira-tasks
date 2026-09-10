@@ -501,7 +501,14 @@ class NotificationService:
                 return
 
             try:
-                events = await self._jira.get_events_since(channel.last_check, channel.jira_target)
+                # Верхнюю границу фиксируем до запроса: события во время запроса
+                # попадут в следующее непересекающееся UTC-окно.
+                window_end = utc_now_naive()
+                events = await self._jira.get_events_since(
+                    channel.last_check,
+                    channel.jira_target,
+                    until=window_end,
+                )
 
                 # Канал могли удалить, пока Jira-запрос выполнялся в отдельном потоке.
                 if self._channels.get(channel.user) is not channel:
@@ -527,7 +534,7 @@ class NotificationService:
 
                         await self._save_state()
 
-                channel.last_check = utc_now_naive()
+                channel.last_check = window_end
 
             except Exception:
                 logger.exception("Error checking channel %s", channel.user)

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,6 +12,9 @@ from bot import status
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Запас покрывает округление JQL до минут и ограниченное расхождение часов Jira и бота.
+JQL_CLOCK_SKEW_OVERLAP_MINUTES = 2
 
 
 class IncompleteJiraDataError(RuntimeError):
@@ -348,38 +352,62 @@ class JiraService:
         """Возвращает имя текущего пользователя Jira."""
         return await asyncio.to_thread(self.client.current_user)
 
-    async def get_events_since(self, since: datetime, target: str | None = None) -> list[JiraEvent]:
-        """Получает события по задачам целевого юзера с указанного времени (асинхронно).
+    async def get_events_since(
+        self,
+        since: datetime,
+        target: str | None = None,
+        *,
+        until: datetime | None = None,
+    ) -> list[JiraEvent]:
+        """Получает события целевого пользователя из UTC-интервала `(since, until]`."""
+        return await asyncio.to_thread(self._get_events_since_sync, since, target, until=until)
 
-        target=None → личный канал (currentUser); иначе — канал коллеги (assignee=target).
-        """
-        return await asyncio.to_thread(self._get_events_since_sync, since, target)
+    @staticmethod
+    def _relative_jql_lookback(since: datetime, query_now: datetime) -> str:
+        """Строит относительное JQL-окно, не зависящее от часового пояса Jira."""
+        if since.tzinfo is not None or query_now.tzinfo is not None:
+            raise ValueError("Event cursors must be naive UTC datetimes")
+        age_seconds = max(0.0, (query_now - since).total_seconds())
+        minutes = math.ceil(age_seconds / 60) + JQL_CLOCK_SKEW_OVERLAP_MINUTES
+        return f"-{minutes}m"
 
-    def _get_events_since_sync(self, since: datetime, target: str | None = None) -> list[JiraEvent]:
-        """Получает события по задачам целевого юзера с указанного времени.
+    def _get_events_since_sync(
+        self,
+        since: datetime,
+        target: str | None = None,
+        *,
+        until: datetime | None = None,
+    ) -> list[JiraEvent]:
+        """Получает события целевого пользователя из UTC-интервала `(since, until]`.
 
-        Отслеживает: создание задач, новые комментарии, изменения статуса, новые назначения.
+        Относительная граница JQL выбирает заведомо более широкий набор кандидатов.
+        Точные границы применяются ниже к меткам времени, приведённым к UTC.
 
         target=None → личный канал: задачи где я assignee, reporter или watcher.
         target="X"  → канал коллеги: только задачи, назначенные на X (ADR-0001).
         """
-        events: list[JiraEvent] = []
+        query_now = utc_now_naive()
+        until = until or query_now
+        if since.tzinfo is not None or until.tzinfo is not None:
+            raise ValueError("Event cursors must be naive UTC datetimes")
+        if until < since:
+            raise ValueError("Event window end must not precede its cursor")
 
-        # Формат даты для JQL
-        since_str = since.strftime("%Y-%m-%d %H:%M")
+        events: list[JiraEvent] = []
+        lookback = self._relative_jql_lookback(since, query_now)
 
         if target is None:
             # Личный канал: задачи, где я assignee, reporter или watcher
             assign_target = self.client.current_user()
             jql = (
                 f'(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) '
-                f'AND updated >= "{since_str}" ORDER BY updated DESC'
+                f'AND updated >= "{lookback}" ORDER BY updated DESC'
             )
         else:
             # Канал коллеги: только назначенные на него (ADR-0001) — это и «его тикеты»
             # по смыслу, и обход прав Manage Watchers (watcher по чужому юзеру не спрашиваем).
             assign_target = target
-            jql = f'assignee = "{target}" AND updated >= "{since_str}" ORDER BY updated DESC'
+            jql = f'assignee = "{target}" AND updated >= "{lookback}" ORDER BY updated DESC'
 
         issues = self._search_issue_pages(
             jql,
@@ -394,7 +422,7 @@ class JiraService:
 
             # Проверяем, была ли задача создана после since (новая задача)
             created_dt = self._parse_jira_datetime(issue.fields.created)
-            if created_dt is not None and created_dt > since:
+            if created_dt is not None and since < created_dt <= until:
                 # Получаем автора (reporter)
                 reporter_name = getattr(issue.fields.reporter, "name", "") or getattr(issue.fields.reporter, "accountId", "")
                 reporter_display = getattr(issue.fields.reporter, "displayName", reporter_name)
@@ -425,7 +453,7 @@ class JiraService:
                 for comment in comments:
                     comment_created = self._parse_jira_datetime(comment.created)
                     # Пропускаем события с некорректной датой или старые
-                    if comment_created is None or comment_created <= since:
+                    if comment_created is None or not since < comment_created <= until:
                         continue
 
                     author_name = getattr(comment.author, "name", "") or getattr(comment.author, "accountId", "")
@@ -454,7 +482,7 @@ class JiraService:
                 for history in histories:
                     history_created = self._parse_jira_datetime(history.created)
                     # Пропускаем события с некорректной датой или старые
-                    if history_created is None or history_created <= since:
+                    if history_created is None or not since < history_created <= until:
                         continue
 
                     author_name = getattr(history.author, "name", "") or getattr(history.author, "accountId", "")
@@ -612,25 +640,20 @@ class JiraService:
                 f"Jira history exceeded {self.HISTORY_LIMIT_PER_POLL} records in one poll"
             )
 
-    def _parse_jira_datetime(self, dt_str: str) -> datetime | None:
+    @staticmethod
+    def _parse_jira_datetime(dt_str: str) -> datetime | None:
         """Парсит строку даты из Jira API.
 
         Jira возвращает даты в формате: 2024-01-15T10:30:00.000+0000
         Возвращает datetime в UTC или None при ошибке парсинга.
         """
         try:
-            # Убираем миллисекунды, оставляем таймзону
-            if "." in dt_str:
-                base, rest = dt_str.split(".")
-                # rest = "000+0000" или "000-0500"
-                tz_part = rest[3:] if len(rest) > 3 else "+0000"
-                dt_str = base + tz_part
-
-            # Парсим с таймзоной (формат: 2024-01-15T10:30:00+0000)
-            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S%z")
-            # Конвертируем в UTC для единообразия
+            dt = datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None:
+                raise ValueError("timezone offset is missing")
+            # Внутренний контракт курсора — UTC без tzinfo; дробная часть сохраняется.
             return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        except (ValueError, AttributeError) as e:
+        except (ValueError, TypeError, AttributeError) as e:
             logger.warning(f"Ошибка парсинга даты '{dt_str}': {e}")
             return None
 
