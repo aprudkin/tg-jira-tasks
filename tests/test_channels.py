@@ -37,7 +37,9 @@ async def test_add_channel_creates_with_given_fields(svc):
 @pytest.mark.asyncio
 async def test_add_channel_is_idempotent_update(svc):
     await svc.add_channel("jdoe", "🔵", 15)
-    svc.get_channel("jdoe").processed_events["ABC-1"] = {"c1"}
+    channel = svc.get_channel("jdoe")
+    channel.processed_events["ABC-1"] = {"c1"}
+    unread_cursor = channel.last_check
 
     await svc.add_channel("jdoe", "🟢", 20)
 
@@ -47,6 +49,7 @@ async def test_add_channel_is_idempotent_update(svc):
     assert channels[0].interval_minutes == 20
     # дедуп сохранён при обновлении
     assert channels[0].processed_events["ABC-1"] == {"c1"}
+    assert channels[0].last_check == unread_cursor
 
 
 @pytest.mark.asyncio

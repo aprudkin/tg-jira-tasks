@@ -47,7 +47,7 @@ The bot serves one subscribed chat. `/sync` manages its personal sync channel, w
 - A new colleague channel is checked immediately after the `/track` confirmation. The background loop's first scheduled poll runs 5 seconds after the channel starts.
 - Persistent state is `/app/data/sync_state.json`; Docker Compose stores it in the `bot_data` volume.
 - Events are deduplicated per channel. The same event on an overlapping issue may intentionally produce one notification from each matching channel.
-- Event-deduplication history is cleaned up when issues enter the closed status group.
+- Event-deduplication history is retained through the replay window when issues enter the closed status group, then ages out normally.
 
 `/sprint` and `/recent` group tasks by status using the canonical order in `bot/status.py`. Unknown statuses are sorted last.
 

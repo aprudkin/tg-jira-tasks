@@ -3,7 +3,7 @@
 Jira-источник и Bot.send_message инъектируются как фейки — вся логика дедупликации
 (на канал), очистки при close и обновления last_check проверяется без сети.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -66,7 +66,7 @@ async def test_dedup_skips_already_processed(svc, fake_jira):
 
 
 @pytest.mark.asyncio
-async def test_close_status_clears_dedup_history(svc, fake_jira):
+async def test_close_status_keeps_dedup_history_for_replay_window(svc, fake_jira):
     fake_jira.get_events_since.return_value = [
         _evt("X-1", "c1"),
         _evt("X-1", "s1", event_type="status_change", to_status="Done"),
@@ -74,8 +74,8 @@ async def test_close_status_clears_dedup_history(svc, fake_jira):
 
     await svc.check_now()
 
-    # После Done вся история X-1 должна быть очищена
-    assert "X-1" not in _me(svc).processed_events
+    # Close не очищает ID немедленно: они нужны при close/reopen в перекрытии.
+    assert _me(svc).processed_events["X-1"] == {"c1", "s1"}
 
 
 @pytest.mark.asyncio
@@ -102,12 +102,14 @@ async def test_last_check_advances_to_prefetch_window_end(svc, fake_jira, monkey
     await svc.check_now()
 
     fake_jira.get_events_since.assert_awaited_once_with(
-        initial,
+        initial - nots.EVENT_REPLAY_OVERLAP,
         None,
         until=window_end,
     )
     assert _me(svc).last_check == window_end
     svc._bot.send_message.assert_not_awaited()
+    restored = nots.NotificationService(state_file=svc._state_path())
+    assert _me(restored).last_check == window_end
 
 
 @pytest.mark.asyncio
@@ -152,8 +154,8 @@ async def test_telegram_rate_limit_triggers_retry(svc, fake_jira, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_telegram_rate_limit_gives_up_after_one_retry(svc, fake_jira, monkeypatch):
-    """После двух подряд 429 событие дропается, чтобы не висеть."""
+async def test_telegram_rate_limit_gives_up_after_bounded_retries(svc, fake_jira, monkeypatch):
+    """Повторные 429 не подтверждают событие и не создают бесконечный цикл."""
     from aiogram.exceptions import TelegramRetryAfter
     from aiogram.methods import SendMessage
 
@@ -170,8 +172,8 @@ async def test_telegram_rate_limit_gives_up_after_one_retry(svc, fake_jira, monk
 
     await svc.check_now()
 
-    # 2 attempt'а, не больше (no infinite loop)
-    assert svc._bot.send_message.await_count == 2
+    assert svc._bot.send_message.await_count == nots.SEND_MAX_ATTEMPTS
+    assert "c1" not in _me(svc).processed_events["X-1"]
 
 
 @pytest.mark.asyncio
@@ -240,3 +242,102 @@ async def test_long_notification_retries_only_failed_chunk(svc, fake_jira, monke
     await svc.check_now()
 
     assert attempts == [expected_chunks[0], expected_chunks[1], *expected_chunks[1:]]
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_keeps_cursor_and_event_unconfirmed(svc, fake_jira):
+    initial = _me(svc).last_check
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1")]
+    svc._bot.send_message = AsyncMock(side_effect=OSError("Telegram unavailable"))
+
+    await svc.check_now()
+
+    assert _me(svc).last_check == initial
+    assert "c1" not in _me(svc).processed_events["X-1"]
+
+
+@pytest.mark.asyncio
+async def test_partial_delivery_persists_only_successes_and_retries_failure(
+    svc, fake_jira, monkeypatch
+):
+    initial = _me(svc).last_check
+    events = [_evt("X-1", "ok"), _evt("X-1", "bad"), _evt("X-1", "also-ok")]
+    fake_jira.get_events_since.return_value = events
+    svc._bot.send_message = AsyncMock(
+        side_effect=[None, *[OSError("timeout")] * nots.SEND_MAX_ATTEMPTS, None]
+    )
+    real_sleep = nots.asyncio.sleep
+
+    async def fake_sleep(delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(nots.asyncio, "sleep", fake_sleep)
+    await svc.check_now()
+
+    assert _me(svc).last_check == initial
+    assert _me(svc).processed_events["X-1"] == {"ok", "also-ok"}
+    svc._bot.send_message = AsyncMock()
+    await svc.check_now()
+    assert svc._bot.send_message.await_count == 1
+    assert _me(svc).processed_events["X-1"] == {"ok", "bad", "also-ok"}
+
+
+@pytest.mark.asyncio
+async def test_state_write_failure_does_not_confirm_cursor(svc, fake_jira, monkeypatch):
+    initial = _me(svc).last_check
+    fake_jira.get_events_since.return_value = [_evt("X-1", "c1")]
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(svc, "_write_state", fail_write)
+    await svc.check_now()
+
+    assert _me(svc).last_check == initial
+    assert "c1" in _me(svc).processed_events["X-1"]
+
+
+@pytest.mark.asyncio
+async def test_replay_dedup_survives_close_and_reopen(svc, fake_jira):
+    close = _evt("X-1", "close", event_type="status_change", to_status="Done")
+    reopen = _evt("X-1", "reopen", event_type="status_change", to_status="Reopened")
+    fake_jira.get_events_since.return_value = [close, reopen]
+    await svc.check_now()
+    sent = svc._bot.send_message.await_count
+
+    # Следующий запрос возвращает перекрывающийся close/reopen, но дублей нет.
+    await svc.check_now()
+    assert svc._bot.send_message.await_count == sent
+
+
+@pytest.mark.asyncio
+async def test_dedup_retention_is_bounded_by_replay_window(svc, fake_jira, monkeypatch):
+    old = _evt("X-1", "old")
+    old.timestamp = _me(svc).last_check - nots.DEDUP_RETENTION - timedelta(seconds=1)
+    _me(svc).processed_events["X-1"] = {"old"}
+    _me(svc).processed_event_times["X-1"] = {"old": old.timestamp}
+    window_end = _me(svc).last_check + timedelta(minutes=1)
+    monkeypatch.setattr(nots, "utc_now_naive", lambda: window_end)
+    fake_jira.get_events_since.return_value = []
+
+    await svc.check_now()
+
+    assert "X-1" not in _me(svc).processed_events
+
+
+@pytest.mark.asyncio
+async def test_more_than_fifty_event_ids_remain_deduplicated(
+    svc, fake_jira, monkeypatch
+):
+    events = [_evt("X-1", f"event-{number}") for number in range(51)]
+    fake_jira.get_events_since.return_value = events
+
+    async def no_sleep(delay):
+        return None
+
+    monkeypatch.setattr(nots.asyncio, "sleep", no_sleep)
+    await svc.check_now()
+    await svc.check_now()
+
+    assert svc._bot.send_message.await_count == 51
+    assert len(_me(svc).processed_events["X-1"]) == 51

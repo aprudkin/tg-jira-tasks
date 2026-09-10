@@ -1,5 +1,6 @@
 """Тесты атомарной записи sync_state.json (канальная схема)."""
 import json
+from datetime import datetime
 
 import bot.services.notifications as nots
 
@@ -11,6 +12,8 @@ def test_save_state_writes_valid_json(state_path):
         user=nots.PERSONAL,
         interval_minutes=15,
         processed_events={"X-1": {"a", "b"}},
+        processed_event_times={"X-1": {"a": datetime(2026, 1, 1, 12), "b": datetime(2026, 1, 1, 12, 1)}},
+        last_check=datetime(2026, 1, 1, 12, 2),
     )
     svc._silent_users = {"alice"}
 
@@ -21,6 +24,10 @@ def test_save_state_writes_valid_json(state_path):
     me = data["channels"][nots.PERSONAL]
     assert me["interval_minutes"] == 15
     assert set(me["processed_events"]["X-1"]) == {"a", "b"}
+    assert data["schema_version"] == 2
+    assert me["cursor_utc"] == "2026-01-01T12:02:00Z"
+    restored = nots.NotificationService(state_file=state_path)
+    assert restored.get_channel(nots.PERSONAL).last_check == datetime(2026, 1, 1, 12, 2)
     assert data["silent_users"] == ["alice"]
 
 

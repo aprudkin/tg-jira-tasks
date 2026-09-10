@@ -209,7 +209,7 @@ The notification service models each tracked user as an independent sync channel
 
 `NotificationService.start()` creates one `asyncio.Task` per active channel. A newly tracked colleague is checked immediately after the `/track` confirmation; the background loop schedules its first poll after five seconds. Later polls use the channel's configured interval. Shutdown cancels and awaits every channel task.
 
-Each successful poll uses the half-open UTC window `(last_check, window_end]`. The service captures `window_end` before requesting Jira data and advances the cursor only after fetching and processing complete without an exception. See ADR-0001 through ADR-0003 for channel independence, per-channel deduplication, and UTC-window semantics.
+Each poll replays the overlapping UTC window `(last_check - 10 minutes, window_end]`. The service captures `window_end` before requesting Jira data and durably advances the cursor only after fetching and delivery complete successfully. Successfully delivered event IDs prevent duplicates inside the replay window; an incomplete poll retains its previous cursor. See ADR-0001 through ADR-0003 for channel independence, per-channel deduplication, and UTC-window semantics.
 
 **Events monitored:**
 
@@ -220,9 +220,9 @@ Each successful poll uses the half-open UTC window `(last_check, window_end]`. T
 
 ### State Persistence
 
-The JSON state contains the subscribed chat, all channel definitions, each channel's per-issue event IDs, and the cross-channel set of muted authors. Writes use a temporary file followed by an atomic replacement. Loading also migrates the former flat schema into the personal `__me__` channel.
+The JSON state contains the subscribed chat, all channel definitions, each channel's UTC cursor and timestamped per-issue event IDs, and the cross-channel set of muted authors. Writes use a temporary file followed by an atomic replacement. Loading also migrates the former flat schema into the personal `__me__` channel.
 
-`last_check` is not persisted. Restored channels receive a fresh UTC baseline so that restart does not replay old events. Docker Compose mounts the `bot_data` volume at `/app/data`, where the default state path is `/app/data/sync_state.json`.
+`last_check` is persisted per channel and restored after restart so the replay window can cover process downtime. Legacy state without a cursor receives one fresh UTC baseline that is saved before polling, preventing an unexpected historical flood during migration. Docker Compose mounts the `bot_data` volume at `/app/data`, where the default state path is `/app/data/sync_state.json`.
 
 ## Security
 

@@ -2,22 +2,42 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+    TelegramUnauthorizedError,
+)
 from aiogram.utils.formatting import Bold, Text
 
 from bot.config import settings
 from bot.render import issue_ref, split_message
 from bot.services.jira import jira_service, JiraEvent, utc_now_naive
-from bot.status import CLOSED_GROUP
 
 logger = logging.getLogger(__name__)
 
 # Задержка между уведомлениями, чтобы не упереться в rate-limit Telegram
 SEND_DELAY_SECONDS = 0.5
+
+# Повторяем последний участок окна: покрывает доставку, рестарт и задержки индекса Jira.
+EVENT_REPLAY_OVERLAP = timedelta(minutes=10)
+# Подтверждения нужны, пока соответствующий участок может попасть в replay-окно.
+DEDUP_RETENTION = EVENT_REPLAY_OVERLAP
+
+# Telegram: ограниченные повторы временных ошибок одного фрагмента.
+SEND_MAX_ATTEMPTS = 3
+SEND_RETRY_INITIAL_SECONDS = 1
+SEND_RETRY_MAX_SECONDS = 30
+
+# Ошибочный канал повторяем быстро, но с ограниченной экспоненциальной паузой.
+ERROR_RETRY_INITIAL_SECONDS = 15
+ERROR_RETRY_MAX_SECONDS = 300
+
+STATE_SCHEMA_VERSION = 2
 
 # Сентинел-ключ личного канала (currentUser). Не может совпасть с Jira-username.
 PERSONAL = "__me__"
@@ -53,8 +73,9 @@ class Channel:
     user: str  # Jira-username, или PERSONAL для личного канала
     interval_minutes: int
     emoji: str | None = None  # маркер; None у личного канала
-    # Дедуп на канал: {issue_key: set(event_ids)}
+    # Дедуп на канал: {issue_key: set(event_ids)}. Времена нужны для pruning replay-окна.
     processed_events: dict[str, set[str]] = field(default_factory=dict)
+    processed_event_times: dict[str, dict[str, datetime]] = field(default_factory=dict)
     last_check: datetime | None = None
     # Не сериализуется: не даёт проверке пережить удаление своего канала.
     check_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
@@ -120,6 +141,10 @@ class NotificationService:
         self._tasks: dict[str, asyncio.Task] = {}
         # Сериализует конкурентные сохранения от разных каналов (общий tmp-файл)
         self._save_lock = asyncio.Lock()
+        # После сбоя записи не отправляем новые события до успешного durable snapshot.
+        self._save_failed = False
+        # Схема без cursor сначала получает baseline и сохраняется до первого опроса.
+        self._migration_pending = False
         # Сериализует добавление и удаление каналов с остановкой их фоновых задач.
         self._lifecycle_lock = asyncio.Lock()
         # Загружаем сохранённое состояние при инициализации
@@ -132,61 +157,186 @@ class NotificationService:
         return self._state_file if self._state_file is not None else settings.state_file
 
     def _load_state(self) -> None:
-        """Загружает состояние из файла (новая схема или миграция плоской старой)."""
+        """Загружает состояние; повреждённый новый cursor не заменяет значением «сейчас»."""
+        state_file = self._state_path()
+        if not state_file.exists():
+            return
+
         try:
-            state_file = self._state_path()
-            if not state_file.exists():
-                return
             data = json.loads(state_file.read_text())
-            self._chat_id = data.get("chat_id")
-            self._silent_users = set(data.get("silent_users", []))
+            schema_version = data.get("schema_version")
+            if schema_version not in (None, STATE_SCHEMA_VERSION):
+                raise ValueError(f"unsupported state schema version: {schema_version!r}")
+            chat_id = data.get("chat_id")
+            silent_users = set(data.get("silent_users", []))
+            channels: dict[str, Channel] = {}
+            baseline = utc_now_naive()
+            migration_needed = False
 
             if "channels" in data:
-                # Новая многоканальная схема
-                for user, ch in data["channels"].items():
-                    self._channels[user] = Channel(
-                        user=user,
-                        interval_minutes=ch.get("interval_minutes", self.DEFAULT_INTERVAL_MINUTES),
-                        emoji=ch.get("emoji"),
-                        processed_events={k: set(v) for k, v in ch.get("processed_events", {}).items()},
+                if not isinstance(data["channels"], dict):
+                    raise ValueError("channels must be an object")
+                for user, raw_channel in data["channels"].items():
+                    if not isinstance(user, str) or not isinstance(raw_channel, dict):
+                        raise ValueError("invalid channel state")
+                    if "cursor_utc" in raw_channel:
+                        cursor = self._parse_utc_timestamp(raw_channel["cursor_utc"])
+                    elif schema_version is None:
+                        # Старая канальная схема не хранила cursor. Не рассылаем всю историю.
+                        cursor = baseline
+                        migration_needed = True
+                    else:
+                        raise ValueError("current notification state is missing cursor_utc")
+                    if cursor > baseline:
+                        logger.warning("Future notification cursor clamped for channel %s", user)
+                        cursor = baseline
+                        migration_needed = True
+                    processed, processed_times = self._load_processed_events(
+                        raw_channel.get("processed_events", {}), cursor
                     )
-            elif self._chat_id is not None:
-                # Миграция плоской схемы → личный канал __me__
+                    channels[user] = Channel(
+                        user=user,
+                        interval_minutes=raw_channel.get(
+                            "interval_minutes", self.DEFAULT_INTERVAL_MINUTES
+                        ),
+                        emoji=raw_channel.get("emoji"),
+                        processed_events=processed,
+                        processed_event_times=processed_times,
+                        last_check=cursor,
+                    )
+            elif chat_id is not None:
+                # Плоская схема становится личным каналом с одним migration-baseline.
                 raw = data.get("processed_events", data.get("processed_ids", []))
-                processed = {k: set(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
-                self._channels[PERSONAL] = Channel(
+                processed, processed_times = self._load_processed_events(raw, baseline)
+                channels[PERSONAL] = Channel(
                     user=PERSONAL,
-                    interval_minutes=data.get("interval_minutes", self.DEFAULT_INTERVAL_MINUTES),
+                    interval_minutes=data.get(
+                        "interval_minutes", self.DEFAULT_INTERVAL_MINUTES
+                    ),
                     emoji=None,
                     processed_events=processed,
+                    processed_event_times=processed_times,
+                    last_check=baseline,
                 )
-
-            # last_check каждого канала ставим на «сейчас», чтобы не переигрывать старые события
-            if self._chat_id is not None:
-                now = utc_now_naive()
-                for channel in self._channels.values():
-                    channel.last_check = now
-                logger.info("Restored %d channel(s) (chat_id=%s)", len(self._channels), self._chat_id)
+                migration_needed = True
         except Exception:
-            logger.exception("Error loading state")
+            # Не запускаем каналы из частично или неоднозначно прочитанного состояния.
+            logger.exception("Error loading notification state; polling disabled")
+            return
 
-    def _serialize_state(self) -> str:
-        """Строит JSON-строку состояния. Вызывается в event-loop потоке (без await),
-        поэтому dict'ы каналов не мутируются конкурентно — снапшот атомарен."""
-        data = {
-            "chat_id": self._chat_id,
-            "channels": {
-                user: {
-                    "interval_minutes": ch.interval_minutes,
-                    "emoji": ch.emoji,
-                    # Преобразуем сеты в списки, ограничивая историю дедупа
-                    "processed_events": {k: list(v)[-50:] for k, v in ch.processed_events.items()},
+        self._chat_id = chat_id
+        self._silent_users = silent_users
+        self._channels = channels
+        self._migration_pending = migration_needed
+        if migration_needed:
+            try:
+                # Baseline должен пережить рестарт ещё до запуска фоновых проверок.
+                self._write_state(self._serialize_state())
+                self._migration_pending = False
+            except Exception:
+                self._save_failed = True
+                logger.exception("Error persisting migrated notification state")
+        if chat_id is not None:
+            logger.info("Restored %d channel(s) (chat_id=%s)", len(channels), chat_id)
+
+    @staticmethod
+    def _format_utc_timestamp(value: datetime) -> str:
+        if value.tzinfo is not None:
+            raise ValueError("Notification timestamps must be naive UTC")
+        return f"{value.isoformat()}Z"
+
+    @staticmethod
+    def _parse_utc_timestamp(value: object) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError("notification timestamp must be a string")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            # Принимаем короткоживущий промежуточный формат до schema_version=2.
+            return parsed
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @classmethod
+    def _load_processed_events(
+        cls, raw: object, fallback: datetime
+    ) -> tuple[dict[str, set[str]], dict[str, dict[str, datetime]]]:
+        """Читает timestamp-map новой схемы и списки ID старой схемы."""
+        processed: dict[str, set[str]] = {}
+        times: dict[str, dict[str, datetime]] = {}
+        if isinstance(raw, list):
+            # Совсем старый глобальный список нельзя безопасно привязать к задачам.
+            return processed, times
+        if not isinstance(raw, dict):
+            raise ValueError("processed_events must be an object")
+        for issue_key, raw_ids in raw.items():
+            if not isinstance(issue_key, str):
+                raise ValueError("issue key must be a string")
+            if isinstance(raw_ids, dict):
+                parsed = {
+                    event_id: cls._parse_utc_timestamp(raw_timestamp)
+                    for event_id, raw_timestamp in raw_ids.items()
+                    if isinstance(event_id, str)
                 }
-                for user, ch in self._channels.items()
-            },
-            "silent_users": list(self._silent_users),
+                if len(parsed) != len(raw_ids):
+                    raise ValueError("event id must be a string")
+            elif isinstance(raw_ids, list):
+                if not all(isinstance(event_id, str) for event_id in raw_ids):
+                    raise ValueError("event id must be a string")
+                parsed = {event_id: fallback for event_id in raw_ids}
+            else:
+                raise ValueError("issue event history must be an object or array")
+            if parsed:
+                processed[issue_key] = set(parsed)
+                times[issue_key] = parsed
+        return processed, times
+
+    def _serialize_state(
+        self,
+        channel_override: tuple[
+            Channel,
+            datetime,
+            dict[str, set[str]],
+            dict[str, dict[str, datetime]],
+        ]
+        | None = None,
+    ) -> str:
+        """Строит детерминированный JSON-снапшот, при необходимости с poll-кандидатом."""
+        fallback = utc_now_naive()
+        override_channel = channel_override[0] if channel_override else None
+        channel_data = {}
+        for user in sorted(self._channels):
+            channel = self._channels[user]
+            if channel is override_channel:
+                _, cursor, processed, processed_times = channel_override
+            else:
+                cursor = channel.last_check
+                processed = channel.processed_events
+                processed_times = channel.processed_event_times
+            # Активный канал всегда сохраняем с cursor, даже если тестовый или
+            # восстановленный объект был создан без baseline.
+            cursor = cursor or fallback
+            channel_data[user] = {
+                "interval_minutes": channel.interval_minutes,
+                "emoji": channel.emoji,
+                "cursor_utc": self._format_utc_timestamp(cursor),
+                "processed_events": {
+                    issue_key: {
+                        event_id: self._format_utc_timestamp(
+                            processed_times.get(issue_key, {}).get(
+                                event_id, cursor or fallback
+                            )
+                        )
+                        for event_id in sorted(processed[issue_key])
+                    }
+                    for issue_key in sorted(processed)
+                },
+            }
+        data = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "chat_id": self._chat_id,
+            "channels": channel_data,
+            "silent_users": sorted(self._silent_users),
         }
-        return json.dumps(data)
+        return json.dumps(data, sort_keys=True)
 
     def _write_state(self, payload: str) -> None:
         """Атомарно пишет уже сериализованную строку (может выполняться в to_thread)."""
@@ -207,6 +357,20 @@ class NotificationService:
         except Exception:
             logger.exception("Error saving state")
 
+    async def _write_payload(self, payload: str) -> None:
+        """Ждёт атомарную запись даже при отмене вызывающей coroutine."""
+        write_task = asyncio.create_task(asyncio.to_thread(self._write_state, payload))
+        try:
+            await asyncio.shield(write_task)
+        except asyncio.CancelledError:
+            # to_thread продолжает работу после отмены await. Ждём его под lock,
+            # иначе следующая запись столкнётся с ним за общий tmp-файл.
+            await write_task
+            raise
+        except Exception as error:
+            logger.exception("Error saving state")
+            raise StateSaveError("Не удалось записать состояние") from error
+
     async def _save_state(self) -> None:
         """Сохраняет актуальный снапшот, не отпуская lock раньше потока записи."""
         async with self._save_lock:
@@ -217,18 +381,34 @@ class NotificationService:
             except Exception as error:
                 logger.exception("Error serializing state")
                 raise StateSaveError("Не удалось сериализовать состояние") from error
+            await self._write_payload(payload)
 
-            write_task = asyncio.create_task(asyncio.to_thread(self._write_state, payload))
+    async def _commit_poll_cursor(self, channel: Channel, cursor: datetime) -> bool:
+        """Атомарно сохраняет новый cursor с дедупом, не публикуя его в памяти заранее."""
+        processed = {key: set(ids) for key, ids in channel.processed_events.items()}
+        processed_times = {
+            key: dict(times) for key, times in channel.processed_event_times.items()
+        }
+        self._prune_processed_events(processed, processed_times, cursor)
+
+        async with self._save_lock:
+            if self._channels.get(channel.user) is not channel:
+                return False
             try:
-                await asyncio.shield(write_task)
-            except asyncio.CancelledError:
-                # to_thread продолжает работу после отмены await. Ждём его под lock,
-                # иначе следующая запись столкнётся с ним за общий tmp-файл.
-                await write_task
-                raise
+                payload = self._serialize_state(
+                    (channel, cursor, processed, processed_times)
+                )
             except Exception as error:
-                logger.exception("Error saving state")
-                raise StateSaveError("Не удалось записать состояние") from error
+                logger.exception("Error serializing poll state")
+                raise StateSaveError("Не удалось сериализовать состояние") from error
+            await self._write_payload(payload)
+            # Только успешная запись делает cursor и pruning видимыми как подтверждённые.
+            if self._channels.get(channel.user) is channel:
+                channel.last_check = cursor
+                channel.processed_events = processed
+                channel.processed_event_times = processed_times
+                return True
+            return False
 
     # ---- Привязка чата и каналы ------------------------------------------
 
@@ -260,7 +440,7 @@ class NotificationService:
                 existing.interval_minutes = interval or existing.interval_minutes
                 if emoji is not None:
                     existing.emoji = emoji
-                existing.last_check = utc_now_naive()
+                # Повторный /track меняет только настройки, не cursor непрочитанного окна.
                 channel = existing
             else:
                 channel = Channel(
@@ -467,8 +647,9 @@ class NotificationService:
         logger.info("Notification service stopped")
 
     async def _channel_loop(self, channel: Channel) -> None:
-        """Цикл проверки одного канала с защитой от неожиданной отмены."""
+        """Цикл проверки одного канала с ограниченным backoff после ошибок."""
         sleep_secs = self._first_check_delay  # первая проверка вскоре после старта (не ждём полный интервал)
+        failure_count = 0
         last_heartbeat: float = 0.0
         while True:
             try:
@@ -480,7 +661,16 @@ class NotificationService:
                     logger.info("Channel %s alive (interval=%dm)", channel.user, channel.interval_minutes)
                     last_heartbeat = now
 
-                await self._check_channel(channel)
+                if await self._check_channel(channel):
+                    failure_count = 0
+                    sleep_secs = channel.interval_minutes * 60
+                else:
+                    failure_count += 1
+                    sleep_secs = min(
+                        ERROR_RETRY_INITIAL_SECONDS * 2 ** min(failure_count - 1, 10),
+                        ERROR_RETRY_MAX_SECONDS,
+                    )
+                    logger.warning("Channel %s retry in %ss (failure %d)", channel.user, sleep_secs, failure_count)
             except asyncio.CancelledError:
                 if self._stopping or self._channels.get(channel.user) is not channel:
                     break
@@ -493,7 +683,7 @@ class NotificationService:
 
     # ---- Проверка и отправка ---------------------------------------------
 
-    async def _check_channel(self, channel: Channel) -> None:
+    async def _check_channel(self, channel: Channel) -> bool:
         """Проверяет один канал: дедуп на канал (ADR-0002), маркер канала в уведомлении."""
         async with channel.check_lock:
             if (
@@ -502,61 +692,121 @@ class NotificationService:
                 or self._chat_id is None
                 or channel.last_check is None
             ):
-                return
+                return True
 
             try:
-                # Верхнюю границу фиксируем до запроса: события во время запроса
-                # попадут в следующее непересекающееся UTC-окно.
+                if self._save_failed or self._migration_pending:
+                    # Общий JSON-файл — единая граница: сначала подтверждаем старый snapshot.
+                    await self._save_state()
+                    self._save_failed = False
+                    self._migration_pending = False
+                # Верхнюю границу фиксируем до запроса, нижнюю повторяем с перекрытием.
                 window_end = utc_now_naive()
+                query_since = channel.last_check - EVENT_REPLAY_OVERLAP
                 events = await self._jira.get_events_since(
-                    channel.last_check,
+                    query_since,
                     channel.jira_target,
                     until=window_end,
                 )
 
                 # Канал могли удалить, пока Jira-запрос выполнялся в отдельном потоке.
                 if self._channels.get(channel.user) is not channel:
-                    return
+                    return True
 
-                if events:
-                    new_events = []
-                    for event in events:
-                        bucket = channel.processed_events.setdefault(event.issue_key, set())
-                        if event.id not in bucket:
-                            new_events.append(event)
+                new_events = []
+                for event in events:
+                    bucket = channel.processed_events.setdefault(event.issue_key, set())
+                    if event.id not in bucket:
+                        new_events.append(event)
 
-                    if new_events:
-                        await self._send_events(self._chat_id, new_events, channel.emoji)
-
-                        for event in new_events:
-                            channel.processed_events[event.issue_key].add(event.id)
-
-                        # Очищаем историю задач, перешедших в закрытый статус
-                        for event in new_events:
-                            if event.event_type == "status_change" and event.to_status in CLOSED_GROUP:
-                                channel.processed_events.pop(event.issue_key, None)
-
+                if new_events:
+                    delivered = await self._send_events(
+                        self._chat_id, new_events, channel.emoji
+                    )
+                    for event in delivered:
+                        channel.processed_events[event.issue_key].add(event.id)
+                        # Время подтверждения, а не время Jira-события, задаёт retention.
+                        channel.processed_event_times.setdefault(event.issue_key, {})[
+                            event.id
+                        ] = window_end
+                    if len(delivered) != len(new_events):
+                        # Успехи сохраняем, cursor удерживаем: остальные вернутся из replay.
                         await self._save_state()
+                        logger.warning(
+                            "Channel poll incomplete channel=%s cursor=%s end=%s "
+                            "fetched=%d delivered=%d failed=%d",
+                            channel.user,
+                            channel.last_check,
+                            window_end,
+                            len(events),
+                            len(delivered),
+                            len(new_events) - len(delivered),
+                        )
+                        return False
 
-                channel.last_check = window_end
+                if not await self._commit_poll_cursor(channel, window_end):
+                    return True
+                logger.info(
+                    "Channel poll complete channel=%s cursor=%s fetched=%d",
+                    channel.user,
+                    window_end,
+                    len(events),
+                )
+                return True
 
+            except StateSaveError:
+                self._save_failed = True
+                logger.exception("Channel poll failed stage=state_save channel=%s cursor=%s", channel.user, channel.last_check)
+                return False
             except Exception:
-                logger.exception("Error checking channel %s", channel.user)
+                logger.exception("Channel poll failed stage=fetch_or_delivery channel=%s cursor=%s", channel.user, channel.last_check)
+                return False
 
-    async def _send_events(self, chat_id: int, events: list[JiraEvent], marker: str | None = None) -> None:
-        """Отправляет уведомления о событиях с маркером канала."""
+    @staticmethod
+    def _prune_processed_events(
+        processed: dict[str, set[str]],
+        processed_times: dict[str, dict[str, datetime]],
+        cursor: datetime,
+    ) -> None:
+        """Удаляет только ID, которые уже недостижимы из replay-окна."""
+        cutoff = cursor - DEDUP_RETENTION
+        for issue_key in list(processed):
+            times = processed_times.setdefault(issue_key, {})
+            bucket = processed[issue_key]
+            for event_id in list(bucket):
+                if times.get(event_id, cursor) <= cutoff:
+                    bucket.remove(event_id)
+                    times.pop(event_id, None)
+            if not bucket:
+                processed.pop(issue_key, None)
+                processed_times.pop(issue_key, None)
+
+    async def _send_events(
+        self, chat_id: int, events: list[JiraEvent], marker: str | None = None
+    ) -> list[JiraEvent]:
+        """Отправляет пакет и возвращает только полностью доставленные события."""
         if not self._bot:
-            return
+            return []
 
+        delivered = []
         for i, event in enumerate(events):
             if i > 0:
                 await asyncio.sleep(SEND_DELAY_SECONDS)
-            await self._send_one(chat_id, event, marker)
+            if await self._send_one(chat_id, event, marker):
+                delivered.append(event)
+        return delivered
 
-    async def _send_one(self, chat_id: int, event: JiraEvent, marker: str | None = None) -> None:
-        """Отправляет фрагменты одного события с retry только неотправленного фрагмента."""
+    async def _send_one(
+        self, chat_id: int, event: JiraEvent, marker: str | None = None
+    ) -> bool:
+        """Подтверждает событие только после всех фрагментов и ограниченных retry."""
+        permanent_errors = (
+            TelegramBadRequest,
+            TelegramForbiddenError,
+            TelegramUnauthorizedError,
+        )
         for chunk in split_message(self._format_event(event, marker)):
-            for attempt in range(2):
+            for attempt in range(SEND_MAX_ATTEMPTS):
                 try:
                     await self._bot.send_message(
                         chat_id,
@@ -564,16 +814,58 @@ class NotificationService:
                         disable_notification=event.author_id in self._silent_users,
                     )
                     break
-                except TelegramRetryAfter as e:
-                    if attempt == 0:
-                        logger.warning(f"Telegram rate-limit, sleeping {e.retry_after}s")
-                        await asyncio.sleep(e.retry_after)
-                        continue
-                    logger.error(f"Rate-limited twice for chat {chat_id}, dropping event {event.id}")
-                    return
-                except Exception:
-                    logger.exception(f"Error sending notification to {chat_id}")
-                    return
+                except TelegramRetryAfter as error:
+                    if attempt + 1 == SEND_MAX_ATTEMPTS:
+                        logger.error(
+                            "Telegram delivery failed class=rate_limit chat=%s "
+                            "event=%s attempts=%d",
+                            chat_id,
+                            event.id,
+                            SEND_MAX_ATTEMPTS,
+                        )
+                        return False
+                    logger.warning(
+                        "Telegram delivery retry class=rate_limit chat=%s event=%s "
+                        "delay=%ss",
+                        chat_id,
+                        event.id,
+                        error.retry_after,
+                    )
+                    await asyncio.sleep(error.retry_after)
+                except permanent_errors as error:
+                    logger.error(
+                        "Telegram delivery failed class=permanent chat=%s event=%s "
+                        "error=%s",
+                        chat_id,
+                        event.id,
+                        type(error).__name__,
+                    )
+                    return False
+                except Exception as error:
+                    if attempt + 1 == SEND_MAX_ATTEMPTS:
+                        logger.error(
+                            "Telegram delivery failed class=transient chat=%s event=%s "
+                            "error=%s attempts=%d",
+                            chat_id,
+                            event.id,
+                            type(error).__name__,
+                            SEND_MAX_ATTEMPTS,
+                        )
+                        return False
+                    delay = min(
+                        SEND_RETRY_INITIAL_SECONDS * 2**attempt,
+                        SEND_RETRY_MAX_SECONDS,
+                    )
+                    logger.warning(
+                        "Telegram delivery retry class=transient chat=%s event=%s "
+                        "error=%s delay=%ss",
+                        chat_id,
+                        event.id,
+                        type(error).__name__,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+        return True
 
     def _format_event(self, event: JiraEvent, marker: str | None = None) -> Text:
         """Форматирует событие. marker (эмодзи канала коллеги) идёт впереди event-type иконки."""

@@ -53,5 +53,5 @@ The statuses that mean *blocked on a decision* — `Discussion`, `On Hold`. Quer
 _Avoid_: Blocked, paused, hold
 
 **Closed group**:
-The statuses that mean *finished* — `Done`, `Closed`, `Resolved`. Reaching one lets a sync channel clear that issue's event-dedup history.
+The statuses that mean *finished* — `Done`, `Closed`, `Resolved`. Reaching one does not immediately clear that issue's event-dedup history; IDs remain until they age out after the replay window.
 _Avoid_: naming it after a single member (Done / Closed / Resolved)
