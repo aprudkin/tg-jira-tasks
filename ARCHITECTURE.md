@@ -326,7 +326,7 @@ async def cmd_overdue(message: Message) -> None:
 
 ## Performance Considerations
 
-- `maxResults=0` for count-only queries (stats)
+- Bounded minimal-field counting: one `total` request on Data Center, token pages on Cloud
 - Lazy client initialization
 - Background polling with configurable interval
 - Single connection per service instance

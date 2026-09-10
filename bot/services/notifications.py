@@ -84,7 +84,7 @@ class TrackOutcome:
 
     status: str  # "tracked" | "chat_busy" | "probe_failed"
     channel: Channel | None = None
-    assigned_count: int = 0
+    has_visible_assigned_tasks: bool = False
 
 
 class StateSaveError(RuntimeError):
@@ -286,12 +286,16 @@ class NotificationService:
             return TrackOutcome("chat_busy")
         # Проба видимости: может ли учётка бота вообще читать задачи этого юзера
         try:
-            count = await self._jira.count_assigned(user)
+            has_visible_tasks = await self._jira.has_visible_assigned_tasks(user)
         except Exception:
             logger.exception("track probe failed for %s", user)
             return TrackOutcome("probe_failed")
         channel = await self.add_channel(user, emoji, interval)
-        return TrackOutcome("tracked", channel=channel, assigned_count=count)
+        return TrackOutcome(
+            "tracked",
+            channel=channel,
+            has_visible_assigned_tasks=has_visible_tasks,
+        )
 
     async def remove_channel(self, chat_id: int, user: str) -> bool:
         """Убирает канал коллеги только по запросу из привязанного чата."""

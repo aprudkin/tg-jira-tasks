@@ -60,10 +60,10 @@ async def test_enable_personal_chat_busy(svc):
 
 @pytest.mark.asyncio
 async def test_track_colleague_success(svc, fake_jira):
-    fake_jira.count_assigned.return_value = 3
+    fake_jira.has_visible_assigned_tasks.return_value = True
     outcome = await svc.track_colleague(100, "jdoe", "🔵", 20)
     assert outcome.status == "tracked"
-    assert outcome.assigned_count == 3
+    assert outcome.has_visible_assigned_tasks is True
     assert outcome.channel.user == "jdoe"
     assert outcome.channel.emoji == "🔵"
     assert svc.get_channel("jdoe") is not None
@@ -71,7 +71,7 @@ async def test_track_colleague_success(svc, fake_jira):
 
 @pytest.mark.asyncio
 async def test_track_colleague_probe_failure_adds_no_channel(svc, fake_jira):
-    fake_jira.count_assigned.side_effect = RuntimeError("no perms")
+    fake_jira.has_visible_assigned_tasks.side_effect = RuntimeError("no perms")
     outcome = await svc.track_colleague(100, "jdoe")
     assert outcome.status == "probe_failed"
     assert svc.get_channel("jdoe") is None

@@ -91,6 +91,8 @@ class JiraService:
     EVENT_ISSUE_LIMIT = 2_000
     HISTORY_LIMIT_PER_ISSUE = 5_000
     HISTORY_LIMIT_PER_POLL = 20_000
+    COUNT_ISSUE_LIMIT = 10_000
+    COUNT_PAGE_LIMIT = 100
     SEARCH_PAGE_LIMIT = 100
     HISTORY_PAGE_LIMIT = 100
 
@@ -191,7 +193,11 @@ class JiraService:
         return self._search_issues(jql, include_assignee=True)
 
     async def get_stats(self) -> JiraStats:
-        """Получает статистику по задачам параллельно."""
+        """Получает точную статистику в одном рабочем потоке."""
+        return await asyncio.to_thread(self._get_stats_sync)
+
+    def _get_stats_sync(self) -> JiraStats:
+        """Последовательно считает показатели, не перегружая общую Jira-сессию."""
         jqls = (
             f'assignee = currentUser() AND status = "{status.IN_PROGRESS}"',
             f'assignee = currentUser() AND {_jql_in("status", status.BACKLOG_GROUP)} '
@@ -199,26 +205,114 @@ class JiraService:
             'assignee = currentUser() AND resolved >= startOfWeek()',
             'assignee = currentUser() AND resolution = Unresolved',
         )
-        in_progress, in_backlog, resolved_this_week, total_assigned = await asyncio.gather(
-            *(asyncio.to_thread(self._count_issues, jql) for jql in jqls)
-        )
-        return JiraStats(
-            in_progress=in_progress,
-            in_backlog=in_backlog,
-            resolved_this_week=resolved_this_week,
-            total_assigned=total_assigned,
-        )
+        counts = tuple(self._count_issues(jql) for jql in jqls)
+        return JiraStats(*counts)
 
     def _count_issues(self, jql: str) -> int:
-        """Возвращает количество задач, соответствующих JQL."""
-        return self.client.search_issues(jql, maxResults=0).total
+        """Возвращает точное ограниченное количество задач для Cloud или Data Center."""
+        if getattr(self.client, "_is_cloud", False) is True:
+            return self._count_cloud_issues(jql)
 
-    async def count_assigned(self, user: str) -> int:
-        """Число задач, назначенных на user — проба видимости для /track.
+        response = self.client.search_issues(
+            jql,
+            maxResults=1,
+            fields=[],
+            json_result=True,
+        )
+        if not isinstance(response, dict) or not isinstance(response.get("issues"), list):
+            raise IncompleteJiraDataError("Jira count returned a malformed response")
+        total = response.get("total")
+        if type(total) is not int or total < 0 or total < len(response["issues"]):
+            raise IncompleteJiraDataError("Jira count returned an invalid total")
+        return total
 
-        Бросает исключение, если Jira не может прочитать (нет прав / нет такого юзера).
-        """
-        return await asyncio.to_thread(self._count_issues, f'assignee = "{user}"')
+    def _count_cloud_issues(self, jql: str) -> int:
+        """Считает Cloud-результат по token-pages без тяжёлых полей и partial-ответов."""
+        jql = self._stable_jql(jql)
+        token: str | None = None
+        seen_tokens: set[str] = set()
+        seen_ids: set[str] = set()
+        seen_keys: set[str] = set()
+
+        for page_count in range(1, self.COUNT_PAGE_LIMIT + 1):
+            response = self.client.enhanced_search_issues(
+                jql,
+                nextPageToken=token,
+                maxResults=self.PAGE_SIZE,
+                fields=[],
+                json_result=True,
+            )
+            if not isinstance(response, dict) or not isinstance(response.get("issues"), list):
+                raise IncompleteJiraDataError("Jira count returned a malformed Cloud page")
+
+            issues = response["issues"]
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    raise IncompleteJiraDataError("Jira count returned a malformed issue")
+                issue_id = issue.get("id")
+                issue_key = issue.get("key")
+                if not isinstance(issue_id, str) or not issue_id.strip():
+                    raise IncompleteJiraDataError("Jira count returned an issue without an ID")
+                if not isinstance(issue_key, str) or not issue_key.strip():
+                    raise IncompleteJiraDataError("Jira count returned an issue without a key")
+                if issue_id in seen_ids or issue_key in seen_keys:
+                    raise IncompleteJiraDataError("Jira count returned a duplicate issue")
+                seen_ids.add(issue_id)
+                seen_keys.add(issue_key)
+                if len(seen_ids) > self.COUNT_ISSUE_LIMIT:
+                    raise IncompleteJiraDataError(
+                        f"Jira count exceeded {self.COUNT_ISSUE_LIMIT} issues"
+                    )
+
+            is_last = response.get("isLast")
+            if type(is_last) is not bool:
+                raise IncompleteJiraDataError("Jira count returned an invalid last-page marker")
+            has_token = "nextPageToken" in response and response["nextPageToken"] is not None
+            next_token = response.get("nextPageToken")
+            if has_token and (not isinstance(next_token, str) or not next_token.strip()):
+                raise IncompleteJiraDataError("Jira count returned an invalid page token")
+            if is_last and has_token:
+                raise IncompleteJiraDataError("Jira count returned contradictory pagination metadata")
+            if not has_token:
+                if not is_last:
+                    raise IncompleteJiraDataError("Jira count ended before the last page")
+                logger.debug("Counted %d Jira issues in %d Cloud pages", len(seen_ids), page_count)
+                return len(seen_ids)
+            if not issues:
+                raise IncompleteJiraDataError("Jira count returned an empty continuation page")
+            if next_token == token or next_token in seen_tokens:
+                raise IncompleteJiraDataError("Jira count returned a repeated page token")
+            if page_count == self.COUNT_PAGE_LIMIT:
+                raise IncompleteJiraDataError("Jira count exceeded the page request limit")
+            seen_tokens.add(next_token)
+            token = next_token
+
+        raise IncompleteJiraDataError("Jira count exceeded the page request limit")
+
+    async def has_visible_assigned_tasks(self, user: str) -> bool:
+        """Проверяет одним запросом, видна ли хотя бы одна задача пользователя."""
+        return await asyncio.to_thread(self._has_visible_assigned_tasks_sync, user)
+
+    def _has_visible_assigned_tasks_sync(self, user: str) -> bool:
+        """Выполняет ограниченную пробу Jira для /track."""
+        jql = f'assignee = "{user}"'
+        if getattr(self.client, "_is_cloud", False) is True:
+            response = self.client.enhanced_search_issues(
+                jql,
+                maxResults=1,
+                fields=[],
+                json_result=True,
+            )
+        else:
+            response = self.client.search_issues(
+                jql,
+                maxResults=1,
+                fields=[],
+                json_result=True,
+            )
+        if not isinstance(response, dict) or not isinstance(response.get("issues"), list):
+            raise IncompleteJiraDataError("Jira visibility probe returned a malformed response")
+        return bool(response["issues"])
 
     @staticmethod
     def _stable_jql(jql: str) -> str:

@@ -19,7 +19,7 @@ router = Router()
 
 # Сообщение пользователю при ошибке Jira (детали — только в логах с exc_info)
 JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
-JIRA_INCOMPLETE_MESSAGE = "⚠️ Jira returned too much data to show safely. No partial result was shown."
+JIRA_INCOMPLETE_MESSAGE = "⚠️ Jira data could not be processed safely. No partial result was shown."
 
 # Текст loading-сообщения для большинства команд
 LOADING_TASKS = "Loading tasks..."
@@ -388,8 +388,9 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
 
     channel = outcome.channel
     tail = (
-        "сейчас 0 назначенных задач" if outcome.assigned_count == 0
-        else f"{outcome.assigned_count} назначенных задач"
+        "бот видит назначенные задачи"
+        if outcome.has_visible_assigned_tasks
+        else "бот не видит назначенных задач"
     )
     await _answer_chunked(
         message,
