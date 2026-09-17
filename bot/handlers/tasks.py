@@ -77,7 +77,7 @@ def schedule_delete(msg: Message, delay: float = LOADING_DELETE_DELAY) -> None:
         await asyncio.sleep(delay)
         try:
             await msg.delete()
-        except Exception:
+        except Exception:  # nosec B110
             # Игнорируем ошибки удаления (сообщение уже удалено и т.д.)
             pass
     task = asyncio.create_task(_delete_later())

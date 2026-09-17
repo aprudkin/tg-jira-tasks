@@ -26,11 +26,12 @@ Run these commands from the repository root. `pyproject.toml` and `uv.lock` defi
 | Full tests | `task test` | Task CLI; expands to the pytest command below |
 | Full tests without Task | `uv run --locked --group dev python -m pytest tests/ -v` | Locked dev environment; uv may synchronize missing dependencies |
 | Focused status tests | `uv run --locked --group dev python -m pytest tests/test_status.py -v` | Same environment as full tests |
+| Security checks | `task security` | Locked Bandit scan plus audit of exported runtime dependencies; the audit queries the vulnerability service |
 | Build container | `task docker:build` | Docker Compose; builds image and installs locked runtime dependencies |
 | Start bot stack | `task docker:up` | Docker Compose and configured `.env`; starts a real bot |
 
 - Do not use `task init` as a prerequisite for inspection or tests: it builds and starts the bot stack.
-- No repository lint, formatter, standalone typecheck command, or CI workflow is currently defined. Do not claim those checks exist or passed.
+- No repository formatter or standalone typecheck command is defined. `.github/workflows/ci.yml` runs the locked full tests, security checks, and a secret-free Docker build on pushes and pull requests; report local and remote results separately.
 - For dependency changes, keep `pyproject.toml` and the uv-generated `uv.lock` consistent; do not hand-edit the lockfile or replace uv with a parallel dependency workflow.
 
 ## Testing and runtime boundaries

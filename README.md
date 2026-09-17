@@ -5,7 +5,8 @@ Telegram-бот для работы с Jira. Показывает задачи, 
 ## Требования
 
 - Docker
-- [uv](https://docs.astral.sh/uv/) для локальной разработки
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/) 0.12.x для локальной разработки
 - Telegram Bot Token (от [@BotFather](https://t.me/BotFather))
 - Jira API Token (для Cloud) или Personal Access Token (для Data Center/Server)
 
@@ -169,14 +170,22 @@ Telegram-бот (aiogram 3.x), который интегрируется с Jira
 
 ## Разработка
 
-Зависимости проекта и их точные версии определяют `pyproject.toml` и `uv.lock`. Чтобы подготовить локальное окружение и запустить полный набор тестов:
+Зависимости проекта и их точные версии определяют `pyproject.toml` и `uv.lock`. Чтобы подготовить локальное окружение и запустить полный набор тестов и проверок безопасности:
 
 ```bash
 uv sync --locked --group dev
 task test
+task security
+task docker:build
 ```
 
-В новом worktree первый запуск может загрузить CPython 3.11 и зафиксированные пакеты, если их нет в кэше uv. Каталог `.venv` создаётся отдельно для каждого worktree, не отслеживается Git и при необходимости пересоздаётся.
+`task security` запускает Bandit для `bot/` и проверяет только runtime-зависимости из lock-файла через `pip-audit`. Проверки и Docker-сборка не требуют production-секретов и не запускают бота. В новом worktree первый запуск может загрузить CPython 3.11 и зафиксированные пакеты, если их нет в кэше uv. Каталог `.venv` создаётся отдельно для каждого worktree, не отслеживается Git и при необходимости пересоздаётся.
+
+GitHub Actions повторяет locked-установку, полный `task test`, security-проверки и Docker-сборку для каждого push и pull request. Actions, Python, uv и оба базовых Docker image зафиксированы версиями; Actions и image дополнительно закреплены immutable commit/digest.
+
+### Контролируемое обновление зависимостей
+
+Dependabot еженедельно предлагает отдельные проверяемые обновления Python-зависимостей, GitHub Actions и Docker base images. Для ручного обновления одного Python-пакета используй `uv lock --upgrade-package <package>`; для запланированного полного обновления — `uv lock --upgrade`. Не редактируй `uv.lock` вручную. Проверь diff lock-файла, затем выполни все четыре команды выше. Обновляя Docker image, сохраняй точный version tag и проверенный registry digest.
 
 Правила разработки для агентов описаны в файле [AGENTS.md](AGENTS.md), а устройство проекта — в [ARCHITECTURE.md](ARCHITECTURE.md).
 

@@ -27,6 +27,16 @@ tasks:
     cmds:
       - uv run --locked --group dev python -m pytest tests/ -v
 
+  security:
+    desc: Run locked static and runtime dependency security checks
+    cmds:
+      - uv run --locked --group dev bandit -r bot
+      - |
+        requirements_file="$(mktemp)"
+        trap 'rm -f "$requirements_file"' EXIT
+        uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file "$requirements_file" > /dev/null
+        uv run --locked --group dev pip-audit --requirement "$requirements_file" --disable-pip
+
   status:
     desc: Show status of the bot stack
     cmds:
