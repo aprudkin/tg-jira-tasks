@@ -1,6 +1,7 @@
 services:
   bot:
     container_name: tg-jira-bot
+    image: "${BOT_IMAGE:-tg-jira-tasks-bot:local}"
     build: .
     env_file:
       - .env

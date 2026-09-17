@@ -1,0 +1,9 @@
+# Deny by default: the image only needs the locked Python application payload.
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!bot/
+!bot/**
+bot/**/__pycache__/
+bot/**/*.py[cod]
