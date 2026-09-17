@@ -3,6 +3,8 @@
 Раньше это была логика в необтестированных хендлерах; теперь — методы сервиса,
 принимающие решение и меняющие состояние (без check_now — тот остаётся за хендлером).
 """
+import asyncio
+
 import pytest
 
 import bot.services.notifications as nots
@@ -75,6 +77,61 @@ async def test_track_colleague_probe_failure_adds_no_channel(svc, fake_jira):
     outcome = await svc.track_colleague(100, "jdoe")
     assert outcome.status == "probe_failed"
     assert svc.get_channel("jdoe") is None
+    assert svc._chat_id is None
+
+
+@pytest.mark.asyncio
+async def test_track_probe_rebinds_original_chat_after_last_channel_is_removed(
+    svc, fake_jira
+):
+    await svc.enable_personal(100, 15)
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+
+    async def blocked_probe(user):
+        probe_started.set()
+        await release_probe.wait()
+        return True
+
+    fake_jira.has_visible_assigned_tasks.side_effect = blocked_probe
+    track_task = asyncio.create_task(svc.track_colleague(100, "alice"))
+    await probe_started.wait()
+
+    assert await svc.unsubscribe(100) is True
+    assert svc._chat_id is None
+    release_probe.set()
+
+    outcome = await track_task
+    assert outcome.status == "tracked"
+    assert svc._chat_id == 100
+    assert svc.get_channel("alice") is outcome.channel
+
+
+@pytest.mark.asyncio
+async def test_track_probe_cannot_add_original_chat_channel_after_another_chat_binds(
+    svc, fake_jira
+):
+    await svc.enable_personal(100, 15)
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+
+    async def blocked_probe(user):
+        probe_started.set()
+        await release_probe.wait()
+        return True
+
+    fake_jira.has_visible_assigned_tasks.side_effect = blocked_probe
+    track_task = asyncio.create_task(svc.track_colleague(100, "alice"))
+    await probe_started.wait()
+
+    assert await svc.unsubscribe(100) is True
+    assert await svc.subscribe(200, 20) is True
+    release_probe.set()
+
+    outcome = await track_task
+    assert outcome.status == "chat_busy"
+    assert svc.is_subscribed(200)
+    assert svc.get_channel("alice") is None
 
 
 @pytest.mark.asyncio

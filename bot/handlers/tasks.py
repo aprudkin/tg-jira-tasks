@@ -20,6 +20,7 @@ router = Router()
 # Сообщение пользователю при ошибке Jira (детали — только в логах с exc_info)
 JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 JIRA_INCOMPLETE_MESSAGE = "⚠️ Jira data could not be processed safely. No partial result was shown."
+STATE_SAVE_ERROR_MESSAGE = "⚠️ Не удалось сохранить изменения. Попробуй ещё раз."
 
 # Текст loading-сообщения для большинства команд
 LOADING_TASKS = "Loading tasks..."
@@ -316,7 +317,12 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
             )
             return
 
-    outcome = await notification_service.enable_personal(chat_id, interval_minutes)
+    try:
+        outcome = await notification_service.enable_personal(chat_id, interval_minutes)
+    except StateSaveError:
+        logger.exception("Failed to persist sync")
+        await message.answer(STATE_SAVE_ERROR_MESSAGE)
+        return
 
     if outcome.status == "interval_changed":
         await message.answer(
@@ -349,7 +355,14 @@ async def cmd_unsync(message: Message) -> None:
         await message.answer("Notifications are not enabled.")
         return
 
-    if await notification_service.unsubscribe(chat_id):
+    try:
+        removed = await notification_service.unsubscribe(chat_id)
+    except StateSaveError:
+        logger.exception("Failed to persist unsync")
+        await message.answer(STATE_SAVE_ERROR_MESSAGE)
+        return
+
+    if removed:
         await message.answer("🔕 Notifications disabled.")
     else:
         await message.answer("Failed to disable notifications.")
@@ -375,7 +388,12 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
         await message.answer("Это служебное имя личного канала. Для своих задач — /sync.")
         return
 
-    outcome = await notification_service.track_colleague(message.chat.id, user, emoji, interval)
+    try:
+        outcome = await notification_service.track_colleague(message.chat.id, user, emoji, interval)
+    except StateSaveError:
+        logger.exception("Failed to persist track for %s", user)
+        await message.answer(STATE_SAVE_ERROR_MESSAGE)
+        return
 
     if outcome.status == "chat_busy":
         await message.answer("Бот уже привязан к другому чату.")
@@ -415,7 +433,7 @@ async def cmd_untrack(message: Message, command: CommandObject) -> None:
         removed = await notification_service.remove_channel(message.chat.id, user)
     except StateSaveError:
         logger.exception("Failed to persist untrack for %s", user)
-        await message.answer("⚠️ Не удалось сохранить отключение. Попробуй ещё раз.")
+        await message.answer(STATE_SAVE_ERROR_MESSAGE)
         return
 
     if removed:
@@ -490,7 +508,12 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
         )
         return
 
-    await notification_service.mute_user(target_user)
+    try:
+        await notification_service.mute_user(target_user)
+    except StateSaveError:
+        logger.exception("Failed to persist silent")
+        await message.answer(STATE_SAVE_ERROR_MESSAGE)
+        return
     await _answer_chunked(message, Text("🔕 Sound OFF for messages from '", target_user, "'."))
 
 
@@ -507,5 +530,10 @@ async def cmd_unsilent(message: Message, command: CommandObject) -> None:
         )
         return
 
-    await notification_service.unmute_user(target_user)
+    try:
+        await notification_service.unmute_user(target_user)
+    except StateSaveError:
+        logger.exception("Failed to persist unsilent")
+        await message.answer(STATE_SAVE_ERROR_MESSAGE)
+        return
     await _answer_chunked(message, Text("🔔 Sound ON for messages from '", target_user, "'."))

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,8 +78,10 @@ class Channel:
     processed_events: dict[str, set[str]] = field(default_factory=dict)
     processed_event_times: dict[str, dict[str, datetime]] = field(default_factory=dict)
     last_check: datetime | None = None
-    # Не сериализуется: не даёт проверке пережить удаление своего канала.
+    # Не сериализуются: check_lock дренирует текущую проверку, active немедленно
+    # ограждает удаляемый канал, пока durable snapshot ещё записывается.
     check_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    active: bool = field(default=True, repr=False, compare=False)
 
     @property
     def is_personal(self) -> bool:
@@ -145,7 +148,9 @@ class NotificationService:
         self._save_failed = False
         # Схема без cursor сначала получает baseline и сохраняется до первого опроса.
         self._migration_pending = False
-        # Сериализует добавление и удаление каналов с остановкой их фоновых задач.
+        # Сериализует все изменения subscribed chat, каналов и muted authors.
+        # Порядок блокировок: lifecycle → channel.check_lock → save. Poll берёт
+        # только check_lock → save; код под check/save никогда не берёт lifecycle.
         self._lifecycle_lock = asyncio.Lock()
         # Загружаем сохранённое состояние при инициализации
         self._load_state()
@@ -298,13 +303,22 @@ class NotificationService:
             dict[str, dict[str, datetime]],
         ]
         | None = None,
+        state_override: tuple[int | None, dict[str, Channel], set[str]] | None = None,
     ) -> str:
-        """Строит детерминированный JSON-снапшот, при необходимости с poll-кандидатом."""
+        """Строит JSON текущего состояния либо ещё не опубликованного lifecycle-кандидата."""
         fallback = utc_now_naive()
         override_channel = channel_override[0] if channel_override else None
+        if state_override is None:
+            chat_id, channels, silent_users = (
+                self._chat_id,
+                self._channels,
+                self._silent_users,
+            )
+        else:
+            chat_id, channels, silent_users = state_override
         channel_data = {}
-        for user in sorted(self._channels):
-            channel = self._channels[user]
+        for user in sorted(channels):
+            channel = channels[user]
             if channel is override_channel:
                 _, cursor, processed, processed_times = channel_override
             else:
@@ -332,9 +346,9 @@ class NotificationService:
             }
         data = {
             "schema_version": STATE_SCHEMA_VERSION,
-            "chat_id": self._chat_id,
+            "chat_id": chat_id,
             "channels": channel_data,
-            "silent_users": sorted(self._silent_users),
+            "silent_users": sorted(silent_users),
         }
         return json.dumps(data, sort_keys=True)
 
@@ -357,19 +371,30 @@ class NotificationService:
         except Exception:
             logger.exception("Error saving state")
 
-    async def _write_payload(self, payload: str) -> None:
-        """Ждёт атомарную запись даже при отмене вызывающей coroutine."""
+    async def _write_payload(
+        self, payload: str, on_success: Callable[[], None] | None = None
+    ) -> None:
+        """Дожидается disk-thread и публикует snapshot до передачи cancellation."""
         write_task = asyncio.create_task(asyncio.to_thread(self._write_state, payload))
+        cancelled = False
+        while not write_task.done():
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                # to_thread нельзя отменить. Не выпускаем save_lock и не оставляем
+                # durable snapshot без соответствующей публикации в памяти.
+                cancelled = True
+            except Exception:
+                break
         try:
-            await asyncio.shield(write_task)
-        except asyncio.CancelledError:
-            # to_thread продолжает работу после отмены await. Ждём его под lock,
-            # иначе следующая запись столкнётся с ним за общий tmp-файл.
-            await write_task
-            raise
+            write_task.result()
         except Exception as error:
             logger.exception("Error saving state")
             raise StateSaveError("Не удалось записать состояние") from error
+        if on_success is not None:
+            on_success()
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _save_state(self) -> None:
         """Сохраняет актуальный снапшот, не отпуская lock раньше потока записи."""
@@ -382,6 +407,24 @@ class NotificationService:
                 logger.exception("Error serializing state")
                 raise StateSaveError("Не удалось сериализовать состояние") from error
             await self._write_payload(payload)
+
+    async def _persist_lifecycle_state(
+        self,
+        chat_id: int | None,
+        channels: dict[str, Channel],
+        silent_users: set[str],
+        publish: Callable[[], None],
+    ) -> None:
+        """Сохраняет lifecycle-кандидат и только затем синхронно публикует его."""
+        async with self._save_lock:
+            try:
+                payload = self._serialize_state(
+                    state_override=(chat_id, channels, silent_users)
+                )
+            except Exception as error:
+                logger.exception("Error serializing state")
+                raise StateSaveError("Не удалось сериализовать состояние") from error
+            await self._write_payload(payload, publish)
 
     async def _commit_poll_cursor(self, channel: Channel, cursor: datetime) -> bool:
         """Атомарно сохраняет новый cursor с дедупом, не публикуя его в памяти заранее."""
@@ -401,26 +444,22 @@ class NotificationService:
             except Exception as error:
                 logger.exception("Error serializing poll state")
                 raise StateSaveError("Не удалось сериализовать состояние") from error
-            await self._write_payload(payload)
-            # Только успешная запись делает cursor и pruning видимыми как подтверждённые.
-            if self._channels.get(channel.user) is channel:
-                channel.last_check = cursor
-                channel.processed_events = processed
-                channel.processed_event_times = processed_times
-                return True
-            return False
+
+            committed = False
+
+            def publish() -> None:
+                nonlocal committed
+                # Публикация идёт и при cancellation после завершения disk-thread.
+                if self._channels.get(channel.user) is channel:
+                    channel.last_check = cursor
+                    channel.processed_events = processed
+                    channel.processed_event_times = processed_times
+                    committed = True
+
+            await self._write_payload(payload, publish)
+            return committed
 
     # ---- Привязка чата и каналы ------------------------------------------
-
-    def _bind_chat(self, chat_id: int) -> bool:
-        """Привязывает единственный чат доставки. False — если чат уже другой."""
-        if self._chat_id is None:
-            self._chat_id = chat_id
-            return True
-        return self._chat_id == chat_id
-
-    def bind_chat(self, chat_id: int) -> bool:
-        return self._bind_chat(chat_id)
 
     def _resolve_marker(self, emoji: str | None) -> str | None:
         """Возвращает маркер: явный или следующий свободный из палитры."""
@@ -432,45 +471,106 @@ class NotificationService:
                 return marker
         return MARKER_PALETTE[0]  # палитра исчерпана — переиспользуем первый
 
-    async def add_channel(self, user: str, emoji: str | None = None, interval: int | None = None) -> Channel:
-        """Создаёт или (идемпотентно) обновляет канал коллеги. Чат должен быть уже привязан."""
-        async with self._lifecycle_lock:
-            existing = self._channels.get(user)
-            if existing is not None:
-                existing.interval_minutes = interval or existing.interval_minutes
-                if emoji is not None:
-                    existing.emoji = emoji
-                # Повторный /track меняет только настройки, не cursor непрочитанного окна.
-                channel = existing
-            else:
-                channel = Channel(
-                    user=user,
-                    interval_minutes=interval or self.DEFAULT_INTERVAL_MINUTES,
-                    emoji=self._resolve_marker(emoji),
-                    last_check=utc_now_naive(),
+    @staticmethod
+    def _channel_with_settings(
+        channel: Channel, interval_minutes: int, emoji: str | None
+    ) -> Channel:
+        """Кандидат настроек для JSON; действующий объект канала не заменяется."""
+        return Channel(
+            user=channel.user,
+            interval_minutes=interval_minutes,
+            emoji=emoji,
+            processed_events=channel.processed_events,
+            processed_event_times=channel.processed_event_times,
+            last_check=channel.last_check,
+            check_lock=channel.check_lock,
+            active=channel.active,
+        )
+
+    async def _upsert_channel_locked(
+        self,
+        chat_id: int,
+        user: str,
+        emoji: str | None,
+        interval: int | None,
+    ) -> Channel:
+        """Persist-first upsert. Caller holds lifecycle_lock and has checked chat owner."""
+        existing = self._channels.get(user)
+        if existing is not None:
+            # Poll заменяет cursor/dedup dict после durable commit. Берём check_lock
+            # до построения кандидата, иначе ожидавший save_lock мог записать старый cursor.
+            async with existing.check_lock:
+                new_interval = interval or existing.interval_minutes
+                new_emoji = emoji if emoji is not None else existing.emoji
+                proposed_channels = dict(self._channels)
+                proposed_channels[user] = self._channel_with_settings(
+                    existing, new_interval, new_emoji
                 )
-                self._channels[user] = channel
-                self._start_channel_task(channel)
-            await self._save_state()
-            return channel
+
+                def publish() -> None:
+                    self._chat_id = chat_id
+                    # Сохраняем identity: removal fencing сравнивает объект по `is`.
+                    existing.interval_minutes = new_interval
+                    existing.emoji = new_emoji
+
+                await self._persist_lifecycle_state(
+                    chat_id, proposed_channels, set(self._silent_users), publish
+                )
+            return existing
+
+        channel = Channel(
+            user=user,
+            interval_minutes=interval or self.DEFAULT_INTERVAL_MINUTES,
+            emoji=self._resolve_marker(emoji),
+            last_check=utc_now_naive(),
+        )
+        proposed_channels = dict(self._channels)
+        proposed_channels[user] = channel
+
+        def publish() -> None:
+            self._chat_id = chat_id
+            self._channels[user] = channel
+            self._start_channel_task(channel)
+
+        await self._persist_lifecycle_state(
+            chat_id, proposed_channels, set(self._silent_users), publish
+        )
+        return channel
+
+    async def add_channel(
+        self, user: str, emoji: str | None = None, interval: int | None = None
+    ) -> Channel:
+        """Создаёт или обновляет канал коллеги; subscribed chat уже должен быть привязан."""
+        async with self._lifecycle_lock:
+            if self._chat_id is None:
+                raise RuntimeError("Cannot add a channel without a subscribed chat")
+            return await self._upsert_channel_locked(
+                self._chat_id, user, emoji, interval
+            )
 
     async def track_colleague(
         self, chat_id: int, user: str, emoji: str | None = None, interval: int | None = None
     ) -> TrackOutcome:
-        """Поднимает канал слежения за коллегой: решение + мутация состояния.
+        """Проверяет Jira без привязки, затем атомарно перепроверяет chat и создаёт канал."""
+        async with self._lifecycle_lock:
+            if self._chat_id is not None and self._chat_id != chat_id:
+                return TrackOutcome("chat_busy")
 
-        Порядок bind→проба→add сохранён намеренно: неудачная проба оставляет чат
-        привязанным без канала (прежнее поведение). check_now — за хендлером, после ответа.
-        """
-        if not self._bind_chat(chat_id):
-            return TrackOutcome("chat_busy")
-        # Проба видимости: может ли учётка бота вообще читать задачи этого юзера
+        # Сетевую пробу нельзя держать под lifecycle_lock: управление существующими
+        # каналами должно продолжаться. Неудачная проба теперь не оставляет пустую привязку.
         try:
             has_visible_tasks = await self._jira.has_visible_assigned_tasks(user)
         except Exception:
             logger.exception("track probe failed for %s", user)
             return TrackOutcome("probe_failed")
-        channel = await self.add_channel(user, emoji, interval)
+
+        async with self._lifecycle_lock:
+            # За время probe последний канал мог удалиться, а другой chat — привязаться.
+            if self._chat_id is not None and self._chat_id != chat_id:
+                return TrackOutcome("chat_busy")
+            channel = await self._upsert_channel_locked(
+                chat_id, user, emoji, interval
+            )
         return TrackOutcome(
             "tracked",
             channel=channel,
@@ -483,48 +583,81 @@ class NotificationService:
             return False
         return await self._remove_channel_internal(user, expected_chat_id=chat_id)
 
-    async def _remove_channel_internal(self, user: str, expected_chat_id: int | None = None) -> bool:
+    async def _remove_channel_internal(
+        self, user: str, expected_chat_id: int | None = None
+    ) -> bool:
         async with self._lifecycle_lock:
             if expected_chat_id is not None and self._chat_id != expected_chat_id:
                 return False
 
-            channel = self._channels.pop(user, None)
-            if channel is None:
+            channel = self._channels.get(user)
+            if channel is None or not channel.active:
                 return False
             previous_chat_id = self._chat_id
+            channel.active = False  # немедленный fence без публикации tentative JSON
+            committed = False
 
-            await self._cancel_channel_task(user)
-            # check_now выполняется вне фоновой задачи. Дожидаемся такой проверки:
-            # после удаления identity-check не даст ей отправить уведомления.
-            async with channel.check_lock:
-                pass
-
-            if not self._channels:
-                self._chat_id = None
-            try:
-                await self._save_state()
-            except StateSaveError:
-                # Не подтверждаем удаление, которое вернётся после перезапуска.
+            def rollback() -> None:
+                channel.active = True
                 self._chat_id = previous_chat_id
                 self._channels[user] = channel
                 self._start_channel_task(channel)
+
+            try:
+                await self._cancel_channel_task(user)
+                # check_now выполняется вне фоновой задачи. Дожидаемся такой проверки;
+                # active=False остановит её до отправки, сохранив старый JSON до commit.
+                async with channel.check_lock:
+                    pass
+
+                proposed_channels = dict(self._channels)
+                proposed_channels.pop(user, None)
+                proposed_chat_id = previous_chat_id if proposed_channels else None
+
+                def publish() -> None:
+                    nonlocal committed
+                    if self._channels.get(user) is channel:
+                        self._channels.pop(user)
+                    self._chat_id = proposed_chat_id
+                    committed = True
+
+                await self._persist_lifecycle_state(
+                    proposed_chat_id,
+                    proposed_channels,
+                    set(self._silent_users),
+                    publish,
+                )
+            except StateSaveError:
+                rollback()
+                raise
+            except asyncio.CancelledError:
+                # _write_payload вызывает publish после завершения disk-thread. До этой
+                # границы отмена означает rollback; после неё removal уже durable.
+                if not committed:
+                    rollback()
                 raise
             return True
 
     def list_channels(self) -> list[Channel]:
-        """Каналы: личный первым, коллеги по имени."""
-        return sorted(self._channels.values(), key=lambda c: (not c.is_personal, c.user))
+        """Активные каналы: личный первым, коллеги по имени."""
+        return sorted(
+            (channel for channel in self._channels.values() if channel.active),
+            key=lambda c: (not c.is_personal, c.user),
+        )
 
     def get_channel(self, user: str) -> Channel | None:
-        return self._channels.get(user)
+        channel = self._channels.get(user)
+        return channel if channel is not None and channel.active else None
 
     # ---- Личный канал (/sync, /unsync) -----------------------------------
 
-    async def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
-        """Подписывает личный канал. False — чат занят другим или уже подписан."""
-        if not self._bind_chat(chat_id):
+    async def _subscribe_locked(
+        self, chat_id: int, interval_minutes: int | None
+    ) -> bool:
+        if self._chat_id is not None and self._chat_id != chat_id:
             return False
-        if PERSONAL in self._channels:
+        existing = self._channels.get(PERSONAL)
+        if existing is not None and existing.active:
             return False
         channel = Channel(
             user=PERSONAL,
@@ -532,72 +665,124 @@ class NotificationService:
             emoji=None,
             last_check=utc_now_naive(),
         )
-        self._channels[PERSONAL] = channel
-        self._start_channel_task(channel)
-        await self._save_state()
-        logger.info("Subscribed personal channel (interval: %d min)", channel.interval_minutes)
+        proposed_channels = dict(self._channels)
+        proposed_channels[PERSONAL] = channel
+
+        def publish() -> None:
+            self._chat_id = chat_id
+            self._channels[PERSONAL] = channel
+            self._start_channel_task(channel)
+
+        await self._persist_lifecycle_state(
+            chat_id, proposed_channels, set(self._silent_users), publish
+        )
+        logger.info(
+            "Subscribed personal channel (interval: %d min)",
+            channel.interval_minutes,
+        )
         return True
+
+    async def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
+        """Подписывает личный канал. False — чат занят другим или уже подписан."""
+        async with self._lifecycle_lock:
+            return await self._subscribe_locked(chat_id, interval_minutes)
 
     async def unsubscribe(self, chat_id: int) -> bool:
         """Отписывает личный канал (каналы коллег остаются)."""
-        if self._chat_id != chat_id:
-            return False
-        if not await self._remove_channel_internal(PERSONAL):
+        if not await self._remove_channel_internal(PERSONAL, expected_chat_id=chat_id):
             return False
         logger.info("Unsubscribed personal channel")
         return True
 
     def is_subscribed(self, chat_id: int) -> bool:
         """Подписан ли личный канал в этом чате."""
-        return self._chat_id == chat_id and PERSONAL in self._channels
+        channel = self._channels.get(PERSONAL)
+        return self._chat_id == chat_id and channel is not None and channel.active
 
     def get_interval(self) -> int:
         """Интервал личного канала."""
-        channel = self._channels.get(PERSONAL)
+        channel = self.get_channel(PERSONAL)
         return channel.interval_minutes if channel else self.DEFAULT_INTERVAL_MINUTES
 
-    async def update_interval(self, chat_id: int, interval_minutes: int) -> bool:
-        """Обновляет интервал личного канала."""
+    async def _update_interval_locked(
+        self, chat_id: int, interval_minutes: int
+    ) -> bool:
         channel = self._channels.get(PERSONAL)
-        if self._chat_id != chat_id or channel is None:
+        if self._chat_id != chat_id or channel is None or not channel.active:
             return False
-        channel.interval_minutes = interval_minutes
-        await self._save_state()
+        # Не копируем poll state до check_lock: poll может ждать save_lock и затем
+        # заменить cursor/dedup-ссылки, пока interval update ожидает запись.
+        async with channel.check_lock:
+            proposed_channels = dict(self._channels)
+            proposed_channels[PERSONAL] = self._channel_with_settings(
+                channel, interval_minutes, channel.emoji
+            )
+
+            def publish() -> None:
+                channel.interval_minutes = interval_minutes
+
+            await self._persist_lifecycle_state(
+                self._chat_id, proposed_channels, set(self._silent_users), publish
+            )
         logger.info("Updated personal interval to %d min", interval_minutes)
         return True
 
-    async def enable_personal(self, chat_id: int, interval_minutes: int | None = None) -> EnableOutcome:
-        """Включает или обновляет личный канал: решение + мутация состояния.
+    async def update_interval(self, chat_id: int, interval_minutes: int) -> bool:
+        """Обновляет интервал личного канала без замены объекта Channel."""
+        async with self._lifecycle_lock:
+            return await self._update_interval_locked(chat_id, interval_minutes)
 
-        check_now НЕ вызывается здесь — он остаётся за хендлером и выполняется ПОСЛЕ
-        подтверждающего ответа, иначе уведомления о событиях уйдут раньше подтверждения.
-        """
-        if self.is_subscribed(chat_id):
-            current = self.get_interval()
-            new = interval_minutes or current
-            if new != current:
-                await self.update_interval(chat_id, new)
-                return EnableOutcome("interval_changed", interval=new, old_interval=current)
-            return EnableOutcome("unchanged", interval=current)
-        if await self.subscribe(chat_id, interval_minutes):
-            return EnableOutcome("enabled", interval=interval_minutes or self.DEFAULT_INTERVAL_MINUTES)
-        return EnableOutcome("chat_busy")
+    async def enable_personal(
+        self, chat_id: int, interval_minutes: int | None = None
+    ) -> EnableOutcome:
+        """Включает/обновляет personal channel одной lifecycle-транзакцией."""
+        async with self._lifecycle_lock:
+            if self._chat_id is not None and self._chat_id != chat_id:
+                return EnableOutcome("chat_busy")
+            channel = self._channels.get(PERSONAL)
+            if channel is not None and channel.active:
+                current = channel.interval_minutes
+                new = interval_minutes or current
+                if new != current:
+                    await self._update_interval_locked(chat_id, new)
+                    return EnableOutcome(
+                        "interval_changed", interval=new, old_interval=current
+                    )
+                return EnableOutcome("unchanged", interval=current)
+            await self._subscribe_locked(chat_id, interval_minutes)
+            return EnableOutcome(
+                "enabled", interval=interval_minutes or self.DEFAULT_INTERVAL_MINUTES
+            )
 
     async def check_now(self, user: str = PERSONAL) -> None:
         """Немедленная проверка канала (по умолчанию — личного)."""
-        channel = self._channels.get(user)
+        channel = self.get_channel(user)
         if channel is not None:
             await self._check_channel(channel)
 
     # ---- Тихий режим (сквозной, по автору события) -----------------------
 
     async def mute_user(self, username: str) -> None:
-        self._silent_users.add(username)
-        await self._save_state()
+        async with self._lifecycle_lock:
+            proposed = set(self._silent_users)
+            proposed.add(username)
+            await self._persist_lifecycle_state(
+                self._chat_id,
+                dict(self._channels),
+                proposed,
+                lambda: self._silent_users.add(username),
+            )
 
     async def unmute_user(self, username: str) -> None:
-        self._silent_users.discard(username)
-        await self._save_state()
+        async with self._lifecycle_lock:
+            proposed = set(self._silent_users)
+            proposed.discard(username)
+            await self._persist_lifecycle_state(
+                self._chat_id,
+                dict(self._channels),
+                proposed,
+                lambda: self._silent_users.discard(username),
+            )
 
     def is_user_silent(self, username: str) -> bool:
         return username in self._silent_users
@@ -608,14 +793,14 @@ class NotificationService:
     # ---- Фоновые задачи по каналам ---------------------------------------
 
     def start(self, bot: Bot) -> None:
-        """Запускает фоновые задачи по всем каналам."""
+        """Запускает фоновые задачи по всем активным каналам."""
         self._bot = bot
         for channel in self._channels.values():
             self._start_channel_task(channel)
-        logger.info("Notification service started (%d channels)", len(self._channels))
+        logger.info("Notification service started (%d channels)", len(self.list_channels()))
 
     def _start_channel_task(self, channel: Channel) -> None:
-        if self._bot is None:
+        if self._bot is None or not channel.active:
             return
         task = self._tasks.get(channel.user)
         if task is not None and not task.done():
@@ -672,7 +857,11 @@ class NotificationService:
                     )
                     logger.warning("Channel %s retry in %ss (failure %d)", channel.user, sleep_secs, failure_count)
             except asyncio.CancelledError:
-                if self._stopping or self._channels.get(channel.user) is not channel:
+                if (
+                    self._stopping
+                    or not channel.active
+                    or self._channels.get(channel.user) is not channel
+                ):
                     break
                 # Неожиданная внешняя отмена — подавляем только у всё ещё текущего объекта канала.
                 asyncio.current_task().uncancel()
@@ -688,6 +877,7 @@ class NotificationService:
         async with channel.check_lock:
             if (
                 self._channels.get(channel.user) is not channel
+                or not channel.active
                 or not self._bot
                 or self._chat_id is None
                 or channel.last_check is None
@@ -710,7 +900,10 @@ class NotificationService:
                 )
 
                 # Канал могли удалить, пока Jira-запрос выполнялся в отдельном потоке.
-                if self._channels.get(channel.user) is not channel:
+                if (
+                    self._channels.get(channel.user) is not channel
+                    or not channel.active
+                ):
                     return True
 
                 new_events = []

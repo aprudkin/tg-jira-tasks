@@ -222,6 +222,10 @@ Each poll replays the overlapping UTC window `(last_check - 10 minutes, window_e
 
 The JSON state contains the subscribed chat, all channel definitions, each channel's UTC cursor and timestamped per-issue event IDs, and the cross-channel set of muted authors. Writes use a temporary file followed by an atomic replacement. Loading also migrates the former flat schema into the personal `__me__` channel.
 
+Channel/chat mutations and muted-author changes are serialized by a lifecycle lock. Jira visibility probes run outside this lock and do not bind a chat; `/track` rechecks ownership after the probe. A candidate snapshot is atomically persisted before settings are published or new channel tasks start. Existing channel objects retain their identity. Removal fences and drains the channel before committing; a failed write restores its activity. An in-flight disk write is awaited even on cancellation, and a successful write is published before cancellation propagates.
+
+Lock order is lifecycle → channel polling lock → save lock (levels may be skipped); polls take only the polling lock and then save lock, never lifecycle. This keeps removal from deadlocking with cursor persistence.
+
 `last_check` is persisted per channel and restored after restart so the replay window can cover process downtime. Legacy state without a cursor receives one fresh UTC baseline that is saved before polling, preventing an unexpected historical flood during migration. Docker Compose mounts the `bot_data` volume at `/app/data`, where the default state path is `/app/data/sync_state.json`.
 
 ## Security

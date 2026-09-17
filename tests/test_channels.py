@@ -1,4 +1,6 @@
 """Швы №2 (управление каналами) и №1 (дедуп на канал → 2 уведомления на общем тикете)."""
+import asyncio
+import threading
 from datetime import datetime
 from unittest.mock import AsyncMock
 
@@ -62,6 +64,108 @@ async def test_add_channel_auto_marker_is_distinct(svc):
 
 
 @pytest.mark.asyncio
+async def test_add_channel_write_failure_keeps_memory_and_json_unchanged(
+    svc, state_path, monkeypatch
+):
+    await svc._save_state()
+    previous_json = state_path.read_text()
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(svc, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await svc.add_channel("jdoe", "🔵", 15)
+
+    assert svc.get_channel("jdoe") is None
+    assert state_path.read_text() == previous_json
+    assert nots.NotificationService(state_file=state_path).get_channel("jdoe") is None
+
+
+@pytest.mark.asyncio
+async def test_add_channel_write_failure_does_not_start_background_task(
+    state_path, fake_jira, monkeypatch
+):
+    service = nots.NotificationService(jira=fake_jira, state_file=state_path)
+    service._chat_id = 100
+    service._bot = AsyncMock()
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await service.add_channel("jdoe", "🔵", 15)
+    await service.stop()
+
+    assert service.get_channel("jdoe") is None
+    assert "jdoe" not in service._tasks
+
+
+@pytest.mark.asyncio
+async def test_existing_channel_write_failure_preserves_identity_and_settings(
+    svc, state_path, monkeypatch
+):
+    channel = await svc.add_channel("jdoe", "🔵", 15)
+    previous_json = state_path.read_text()
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(svc, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await svc.add_channel("jdoe", "🟢", 20)
+
+    assert svc.get_channel("jdoe") is channel
+    assert channel.emoji == "🔵"
+    assert channel.interval_minutes == 15
+    assert state_path.read_text() == previous_json
+
+
+@pytest.mark.asyncio
+async def test_channel_update_waiting_for_poll_persists_latest_cursor(
+    svc, fake_jira, state_path, monkeypatch
+):
+    channel = await svc.add_channel("jdoe", "🔵", 15)
+    old_cursor = datetime(2026, 1, 1, 12, 0)
+    new_cursor = datetime(2026, 1, 1, 12, 5)
+    channel.last_check = old_cursor
+    svc._bot = AsyncMock()
+    fake_jira.get_events_since.return_value = []
+    monkeypatch.setattr(nots, "utc_now_naive", lambda: new_cursor)
+
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_write = svc._write_state
+    first_write = True
+
+    def block_poll_write(payload):
+        nonlocal first_write
+        if first_write:
+            first_write = False
+            write_started.set()
+            assert release_write.wait(timeout=2)
+        original_write(payload)
+
+    monkeypatch.setattr(svc, "_write_state", block_poll_write)
+    poll_task = asyncio.create_task(svc.check_now("jdoe"))
+    assert await asyncio.to_thread(write_started.wait, 1)
+    update_task = asyncio.create_task(svc.add_channel("jdoe", "🟢", 20))
+    await asyncio.sleep(0)  # update builds its candidate, then waits for poll's save_lock
+    release_write.set()
+
+    await poll_task
+    updated = await update_task
+
+    assert updated is channel
+    assert channel.last_check == new_cursor
+    assert channel.interval_minutes == 20
+    restored = nots.NotificationService(state_file=state_path).get_channel("jdoe")
+    assert restored.last_check == new_cursor
+    assert restored.interval_minutes == 20
+
+
+@pytest.mark.asyncio
 async def test_remove_channel(svc):
     await svc.add_channel("jdoe", "🔵", 15)
     assert await svc.remove_channel(100, "jdoe") is True
@@ -116,6 +220,125 @@ async def test_list_channels_personal_first(svc):
     order = [c.user for c in svc.list_channels()]
     assert order[0] == nots.PERSONAL
     assert order[1:] == ["amy", "zoe"]  # коллеги по имени
+
+
+@pytest.mark.asyncio
+async def test_personal_interval_write_failure_preserves_identity_and_json(
+    state_path, fake_jira, monkeypatch
+):
+    service = nots.NotificationService(jira=fake_jira, state_file=state_path)
+    assert await service.subscribe(100, 15) is True
+    channel = service.get_channel(nots.PERSONAL)
+    previous_json = state_path.read_text()
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await service.update_interval(100, 30)
+
+    assert service.get_channel(nots.PERSONAL) is channel
+    assert channel.interval_minutes == 15
+    assert state_path.read_text() == previous_json
+
+
+@pytest.mark.asyncio
+async def test_subscribe_write_failure_does_not_bind_or_publish_channel(
+    state_path, fake_jira, monkeypatch
+):
+    service = nots.NotificationService(jira=fake_jira, state_file=state_path)
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await service.subscribe(100, 15)
+
+    assert service._chat_id is None
+    assert service.get_channel(nots.PERSONAL) is None
+
+
+@pytest.mark.asyncio
+async def test_subscribe_publishes_only_after_disk_write_completes(
+    state_path, fake_jira, monkeypatch
+):
+    service = nots.NotificationService(jira=fake_jira, state_file=state_path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_write = service._write_state
+
+    def blocked_write(payload):
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        original_write(payload)
+
+    monkeypatch.setattr(service, "_write_state", blocked_write)
+    subscribe_task = asyncio.create_task(service.subscribe(100, 15))
+    try:
+        assert await asyncio.to_thread(write_started.wait, 1)
+        assert service._chat_id is None
+        assert service.get_channel(nots.PERSONAL) is None
+    finally:
+        release_write.set()
+
+    assert await subscribe_task is True
+    assert service.is_subscribed(100)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_subscribe_finishes_disk_write_before_publishing(
+    state_path, fake_jira, monkeypatch
+):
+    service = nots.NotificationService(jira=fake_jira, state_file=state_path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_write = service._write_state
+
+    def blocked_write(payload):
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        original_write(payload)
+
+    monkeypatch.setattr(service, "_write_state", blocked_write)
+    subscribe_task = asyncio.create_task(service.subscribe(100, 15))
+    assert await asyncio.to_thread(write_started.wait, 1)
+    subscribe_task.cancel()
+    release_write.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await subscribe_task
+
+    assert service.is_subscribed(100)
+    restored = nots.NotificationService(state_file=state_path)
+    assert restored.is_subscribed(100)
+
+
+@pytest.mark.asyncio
+async def test_mute_and_unmute_write_failures_leave_no_hidden_mutation(
+    svc, state_path, monkeypatch
+):
+    await svc._save_state()
+    previous_json = state_path.read_text()
+
+    def fail_write(payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(svc, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await svc.mute_user("alice")
+    assert not svc.is_user_silent("alice")
+    assert state_path.read_text() == previous_json
+
+    monkeypatch.undo()
+    await svc.mute_user("alice")
+    muted_json = state_path.read_text()
+    monkeypatch.setattr(svc, "_write_state", fail_write)
+    with pytest.raises(nots.StateSaveError):
+        await svc.unmute_user("alice")
+    assert svc.is_user_silent("alice")
+    assert state_path.read_text() == muted_json
 
 
 # ---- Шов №1: дедуп на канал → 2 уведомления на общем тикете (ADR-0002) ----
