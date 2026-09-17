@@ -32,6 +32,8 @@ JIRA_EMAIL=your_email@company.com  # Обязательно для Cloud, не �
 JIRA_API_TOKEN=your_jira_api_token # Для Cloud
 JIRA_PAT=your_personal_access_token # Для Data Center / Server (имеет приоритет над Email/API Token)
 ALLOWED_USERS=123456789,987654321
+ALLOWED_CHAT_IDS=
+ALLOW_OPEN_ACCESS=false
 ```
 
 ### Получение токенов
@@ -48,6 +50,25 @@ ALLOWED_USERS=123456789,987654321
 
 **Telegram User ID:**
 - Отправьте сообщение боту [@userinfobot](https://t.me/userinfobot) для получения вашего ID
+
+### Политика доступа и обновление существующей установки
+
+По умолчанию `ALLOWED_USERS` обязателен и содержит Telegram user ID, которым
+разрешены команды в их приватных чатах. Сообщение без `from_user` всегда
+отклоняется. Группа или supergroup доступна только когда одновременно разрешён
+отправитель и её отрицательный chat ID явно добавлен в `ALLOWED_CHAT_IDS`.
+
+`ALLOW_OPEN_ACCESS=true` — осознанный escape hatch: он разрешает любого
+известного отправителя в приватном чате, но **не открывает группы**. Для групп
+по-прежнему нужен `ALLOWED_CHAT_IDS`.
+
+Перед обновлением старой установки, где `ALLOWED_USERS` был пустым, выберите
+одно из двух: заполните его или явно установите `ALLOW_OPEN_ACCESS=true`. Если
+уже сохранён subscribed chat, добавьте его владельца в `ALLOWED_USERS` для
+положительного private chat ID либо сам отрицательный group chat ID в
+`ALLOWED_CHAT_IDS`. Запрещённый после обновления subscribed chat остаётся в
+state без удаления каналов и cursor, но фоновая доставка не запускается до
+исправления политики и рестарта.
 
 ### Запуск через Docker Compose
 
@@ -121,7 +142,11 @@ task --list-all
 | `JIRA_EMAIL` | Email аккаунта Jira (для Cloud) | Да (если нет PAT) |
 | `JIRA_API_TOKEN` | API токен Jira (для Cloud) | Да (если нет PAT) |
 | `JIRA_PAT` | Personal Access Token (для DC/Server) | Да (если нет Cloud auth) |
-| `ALLOWED_USERS` | Положительные целые ID пользователей через запятую (пусто = все); проверяется при старте | Нет |
+| `ALLOWED_USERS` | Положительные Telegram user ID через запятую; обязателен, если не включён явный открытый режим | Да* |
+| `ALLOWED_CHAT_IDS` | Отрицательные ID разрешённых group/supergroup через запятую; пусто = группы запрещены | Нет |
+| `ALLOW_OPEN_ACCESS` | Явно разрешить любого известного отправителя в private chat; группы не открывает | Нет (по умолчанию `false`) |
+
+\* `ALLOWED_USERS` может быть пустым только при `ALLOW_OPEN_ACCESS=true`.
 
 
 ## Архитектура
@@ -134,11 +159,11 @@ Telegram-бот (aiogram 3.x), который интегрируется с Jira
 - `bot/services/jira.py` - Класс JiraService, обертка над библиотекой jira-python, использует JQL запросы
 - `bot/services/notifications.py` - Сервис фоновых уведомлений с персистентным состоянием
 - `bot/handlers/tasks.py` - Обработчики команд (Router pattern из aiogram)
-- `bot/middlewares/auth.py` - Middleware для фильтрации пользователей Telegram (белый список)
+- `bot/middlewares/auth.py` - Middleware общей политики доступа отправителя и чата
 
-**Поток:** Команда пользователя → AuthMiddleware (проверка белого списка) → Handler → JiraService → Ответ
+**Поток:** Команда пользователя → AuthMiddleware (единая проверка отправителя и чата) → Handler → JiraService → Ответ
 
-**Уведомления:** Состояние `/sync` сохраняется в `/app/data/sync_state.json` и восстанавливается после перезапуска.
+**Уведомления:** Состояние `/sync` сохраняется в `/app/data/sync_state.json` и восстанавливается после перезапуска. Перед восстановленной фоновой доставкой тот же access policy повторно проверяет subscribed chat.
 
 Подробнее см. [ARCHITECTURE.md](ARCHITECTURE.md).
 

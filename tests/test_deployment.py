@@ -198,6 +198,46 @@ def test_state_diagnostic_does_not_echo_persisted_identities(tmp_path):
     assert "-100123" not in output
 
 
+def test_state_diagnostic_rejects_forbidden_destination_without_echoing_it(tmp_path):
+    forbidden_chat = "-100987654321"
+    state_file = tmp_path / "sync_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "chat_id": int(forbidden_chat),
+                "channels": {},
+                "silent_users": [],
+            }
+        )
+    )
+    env = os.environ.copy()
+    env.update(
+        TELEGRAM_TOKEN="test-token",
+        JIRA_URL="http://jira.test",
+        JIRA_PAT="test-pat",
+        ALLOWED_USERS="123",
+        ALLOWED_CHAT_IDS="",
+        ALLOW_OPEN_ACCESS="false",
+        STATE_FILE=str(state_file),
+        PYTHONPATH=str(ROOT),
+    )
+
+    result = subprocess.run(
+        [str(ROOT / ".venv/bin/python"), "-m", "bot.state_check"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert forbidden_chat not in output
+    assert "forbidden by the access policy" in output
+
+
 def test_startup_wait_accepts_initial_polling_delay():
     clock = Clock()
     log_calls = 0

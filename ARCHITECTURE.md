@@ -226,24 +226,22 @@ Channel/chat mutations and muted-author changes are serialized by a lifecycle lo
 
 Lock order is lifecycle → channel polling lock → save lock (levels may be skipped); polls take only the polling lock and then save lock, never lifecycle. This keeps removal from deadlocking with cursor persistence.
 
-`last_check` is persisted per channel and restored after restart so the replay window can cover process downtime. Legacy state without a cursor receives one fresh UTC baseline that is saved before polling, preventing an unexpected historical flood during migration. Docker Compose mounts the `bot_data` volume at `/app/data`, where the default state path is `/app/data/sync_state.json`.
+`last_check` is persisted per channel and restored after restart so the replay window can cover process downtime. Legacy state without a cursor receives one fresh UTC baseline that is saved before polling, preventing an unexpected historical flood during migration. Before restored loops start, the shared Telegram access policy reauthorizes the subscribed chat: a positive private chat ID must still be an allowed user (unless explicit open access is enabled), while a negative group ID must be in the group allowlist. A forbidden destination is retained unchanged in state but receives no fetches or deliveries until configuration is fixed and the process restarts. Docker Compose mounts the `bot_data` volume at `/app/data`, where the default state path is `/app/data/sync_state.json`.
 
 ## Security
 
-### Authentication Middleware
+### Telegram Access Policy
 
-Whitelist-based access control:
+One policy is shared by the message middleware and restored background delivery.
+`ALLOWED_USERS` is required by default and authorizes known senders in their
+private chats. Group/supergroup commands additionally require the negative chat
+ID in `ALLOWED_CHAT_IDS`; reads and mutations pass through the same middleware.
+Missing senders and unsupported chat types are always denied.
 
-```python
-class AuthMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if user_id not in settings.allowed_user_ids:
-            await event.answer("Access denied.")
-            return None
-        return await handler(event, data)
-```
-
-Empty whitelist = allow all (development mode).
+`ALLOW_OPEN_ACCESS=true` is the explicit escape hatch for private chats. It does
+not bypass the group allowlist. Background delivery has no incoming sender, so a
+positive persisted chat ID is checked as a user ID and a negative chat ID is
+checked only against `ALLOWED_CHAT_IDS`.
 
 ### Secrets Management
 

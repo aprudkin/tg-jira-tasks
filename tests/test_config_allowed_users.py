@@ -19,10 +19,20 @@ def test_allowed_users_are_validated_and_parsed_at_settings_construction():
 
 
 @pytest.mark.parametrize("allowed_users", ["", " ", "\t\n"])
-def test_empty_or_whitespace_only_allowed_users_allows_everyone(allowed_users):
-    configured = Settings(**BASE_SETTINGS, allowed_users=allowed_users)
+def test_empty_allowed_users_requires_explicit_open_access(allowed_users):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**BASE_SETTINGS, allowed_users=allowed_users)
+
+    assert "ALLOW_OPEN_ACCESS" in str(exc_info.value)
+
+
+def test_explicit_open_access_allows_empty_user_list():
+    configured = Settings(
+        **BASE_SETTINGS, allowed_users="", allow_open_access=True
+    )
 
     assert configured.allowed_user_ids == []
+    assert configured.allow_open_access is True
 
 
 @pytest.mark.parametrize(
@@ -43,6 +53,29 @@ def test_empty_or_whitespace_only_allowed_users_allows_everyone(allowed_users):
 def test_invalid_allowed_users_fail_during_settings_construction(allowed_users):
     with pytest.raises(ValidationError):
         Settings(**BASE_SETTINGS, allowed_users=allowed_users)
+
+
+def test_allowed_group_chat_ids_are_validated_and_parsed():
+    configured = Settings(
+        **BASE_SETTINGS,
+        allowed_users="123",
+        allowed_chat_ids=" -100123, -456 ",
+    )
+
+    assert configured.allowed_group_chat_ids == [-100123, -456]
+
+
+@pytest.mark.parametrize(
+    "allowed_chat_ids",
+    ["0", "123", "-100123,0", "-100123,123", "-100123,, -456", "group"],
+)
+def test_invalid_allowed_group_chat_ids_fail_at_startup(allowed_chat_ids):
+    with pytest.raises(ValidationError):
+        Settings(
+            **BASE_SETTINGS,
+            allowed_users="123",
+            allowed_chat_ids=allowed_chat_ids,
+        )
 
 
 def test_invalid_allowed_users_error_does_not_expose_input_or_secrets():

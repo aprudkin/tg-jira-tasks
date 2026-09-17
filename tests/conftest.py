@@ -4,6 +4,8 @@ import os
 os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
 os.environ.setdefault("JIRA_URL", "http://jira.test")
 os.environ.setdefault("JIRA_PAT", "test-pat")
+os.environ.setdefault("ALLOWED_USERS", "1,2,5,42,100,123,200,555,777,999")
+os.environ.setdefault("ALLOWED_CHAT_IDS", "-100123")
 
 from unittest.mock import AsyncMock
 

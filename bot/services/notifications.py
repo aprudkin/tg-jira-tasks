@@ -16,6 +16,7 @@ from aiogram.exceptions import (
 )
 from aiogram.utils.formatting import Bold, Text
 
+from bot.access import AccessPolicy, access_policy
 from bot.config import settings
 from bot.intervals import validate_interval
 from bot.render import issue_ref, split_message
@@ -132,10 +133,12 @@ class NotificationService:
         jira=jira_service,
         state_file: Path | None = None,
         first_check_delay: float = FIRST_CHECK_DELAY_SECONDS,
+        policy: AccessPolicy = access_policy,
     ) -> None:
         # Коллаборанты принимаются, а не создаются — так интерфейс становится тестовой
         # поверхностью (в тестах подставляются фейки без monkeypatch глобалов).
         self._jira = jira  # источник событий Jira (нужен только get_events_since)
+        self._access_policy = policy
         self._state_file = state_file  # None → путь берём из settings динамически
         self._first_check_delay = first_check_delay  # задержка первой проверки канала
         self._chat_id: int | None = None
@@ -173,6 +176,11 @@ class NotificationService:
     def state_load_error(self) -> StateLoadError | None:
         """Публичный статус ошибки загрузки, блокирующей старт и перезапись файла."""
         return self._state_load_error
+
+    @property
+    def subscribed_chat_allowed(self) -> bool:
+        """Можно ли доставлять в текущий subscribed chat по активной policy."""
+        return self._chat_id is None or self._access_policy.allows_delivery(self._chat_id)
 
     def _load_state(self) -> None:
         """Проверяет весь файл во временных структурах и лишь затем устанавливает state."""
@@ -872,10 +880,16 @@ class NotificationService:
     # ---- Фоновые задачи по каналам ---------------------------------------
 
     def start(self, bot: Bot) -> None:
-        """Запускает фоновые задачи по всем активным каналам."""
+        """Запускает фоновые задачи, только если subscribed chat всё ещё разрешён."""
         if self._state_load_error is not None:
             raise self._state_load_error
         self._bot = bot
+        if not self.subscribed_chat_allowed:
+            # Состояние намеренно сохраняем: оператор может исправить policy и рестартовать.
+            logger.warning(
+                "Notification delivery disabled: subscribed chat is not allowed by access policy"
+            )
+            return
         for channel in self._channels.values():
             self._start_channel_task(channel)
         logger.info("Notification service started (%d channels)", len(self.list_channels()))
@@ -961,6 +975,7 @@ class NotificationService:
                 or not channel.active
                 or not self._bot
                 or self._chat_id is None
+                or not self._access_policy.allows_delivery(self._chat_id)
                 or channel.last_check is None
             ):
                 return True
@@ -1059,7 +1074,7 @@ class NotificationService:
         self, chat_id: int, events: list[JiraEvent], marker: str | None = None
     ) -> list[JiraEvent]:
         """Отправляет пакет и возвращает только полностью доставленные события."""
-        if not self._bot:
+        if not self._bot or not self._access_policy.allows_delivery(chat_id):
             return []
 
         delivered = []
