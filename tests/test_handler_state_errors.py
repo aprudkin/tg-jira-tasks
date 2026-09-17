@@ -5,7 +5,7 @@ from aiogram.filters import CommandObject
 import pytest
 
 import bot.handlers.tasks as tasks
-from bot.services.notifications import StateSaveError
+from bot.services.notifications import StateLoadError, StateSaveError
 
 
 @pytest.mark.parametrize(
@@ -19,12 +19,21 @@ from bot.services.notifications import StateSaveError
         ("unsilent", "unmute_user", "alice"),
     ],
 )
-async def test_state_save_error_is_reported(monkeypatch, command, method, args):
+@pytest.mark.parametrize(
+    "error_type,expected_message",
+    [
+        (StateSaveError, tasks.STATE_SAVE_ERROR_MESSAGE),
+        (StateLoadError, tasks.STATE_LOAD_ERROR_MESSAGE),
+    ],
+)
+async def test_state_save_error_is_reported(
+    monkeypatch, command, method, args, error_type, expected_message
+):
     service = MagicMock()
     service.is_subscribed.return_value = True
     service.is_user_silent.return_value = command == "unsilent"
     service.check_now = AsyncMock()
-    mutation = AsyncMock(side_effect=StateSaveError("private disk details"))
+    mutation = AsyncMock(side_effect=error_type("private disk details"))
     setattr(service, method, mutation)
     monkeypatch.setattr(tasks, "notification_service", service)
     message = MagicMock()
@@ -36,7 +45,5 @@ async def test_state_save_error_is_reported(monkeypatch, command, method, args):
     else:
         await handler(message, CommandObject(prefix="/", command=command, args=args))
     mutation.assert_awaited_once()
-    message.answer.assert_awaited_once_with(
-        "⚠️ Не удалось сохранить изменения. Попробуй ещё раз."
-    )
+    message.answer.assert_awaited_once_with(expected_message)
     service.check_now.assert_not_awaited()

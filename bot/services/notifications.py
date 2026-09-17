@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from aiogram.exceptions import (
 from aiogram.utils.formatting import Bold, Text
 
 from bot.config import settings
+from bot.intervals import validate_interval
 from bot.render import issue_ref, split_message
 from bot.services.jira import jira_service, JiraEvent, utc_now_naive
 
@@ -115,6 +117,10 @@ class StateSaveError(RuntimeError):
     """Состояние уведомлений не удалось надёжно сохранить."""
 
 
+class StateLoadError(StateSaveError):
+    """Сохранённое состояние не прошло полную проверку при загрузке."""
+
+
 class NotificationService:
     """Сервис отправки уведомлений о событиях Jira по независимым каналам."""
 
@@ -146,6 +152,8 @@ class NotificationService:
         self._save_lock = asyncio.Lock()
         # После сбоя записи не отправляем новые события до успешного durable snapshot.
         self._save_failed = False
+        # Невалидный файл нельзя молча заменить пустым состоянием поздней командой.
+        self._state_load_error: StateLoadError | None = None
         # Схема без cursor сначала получает baseline и сохраняется до первого опроса.
         self._migration_pending = False
         # Сериализует все изменения subscribed chat, каналов и muted authors.
@@ -161,29 +169,67 @@ class NotificationService:
         """Путь к файлу состояния: инъекция из конструктора или settings по умолчанию."""
         return self._state_file if self._state_file is not None else settings.state_file
 
+    @property
+    def state_load_error(self) -> StateLoadError | None:
+        """Публичный статус ошибки загрузки, блокирующей старт и перезапись файла."""
+        return self._state_load_error
+
     def _load_state(self) -> None:
-        """Загружает состояние; повреждённый новый cursor не заменяет значением «сейчас»."""
+        """Проверяет весь файл во временных структурах и лишь затем устанавливает state."""
         state_file = self._state_path()
         if not state_file.exists():
             return
 
         try:
             data = json.loads(state_file.read_text())
-            schema_version = data.get("schema_version")
-            if schema_version not in (None, STATE_SCHEMA_VERSION):
-                raise ValueError(f"unsupported state schema version: {schema_version!r}")
+            if not isinstance(data, dict):
+                raise ValueError("notification state root must be an object")
+
+            if "schema_version" in data:
+                schema_version = data["schema_version"]
+                if type(schema_version) is not int:
+                    raise ValueError("state schema version must be an integer")
+                if schema_version != STATE_SCHEMA_VERSION:
+                    raise ValueError("unsupported state schema version")
+            else:
+                schema_version = None
+
             chat_id = data.get("chat_id")
-            silent_users = set(data.get("silent_users", []))
+            if chat_id is not None and (type(chat_id) is not int or chat_id == 0):
+                raise ValueError("chat_id must be a non-zero integer or null")
+
+            raw_silent_users = data.get("silent_users", [])
+            if not isinstance(raw_silent_users, list):
+                raise ValueError("silent_users must be an array of strings")
+            silent_users = {
+                self._validate_state_identity(user, "silent user")
+                for user in raw_silent_users
+            }
+
             channels: dict[str, Channel] = {}
             baseline = utc_now_naive()
             migration_needed = False
 
             if "channels" in data:
-                if not isinstance(data["channels"], dict):
+                raw_channels = data["channels"]
+                if not isinstance(raw_channels, dict):
                     raise ValueError("channels must be an object")
-                for user, raw_channel in data["channels"].items():
-                    if not isinstance(user, str) or not isinstance(raw_channel, dict):
+                if chat_id is None and raw_channels:
+                    raise ValueError("channels require a subscribed chat")
+                for user, raw_channel in raw_channels.items():
+                    user = self._validate_state_identity(user, "channel user")
+                    if not isinstance(raw_channel, dict):
                         raise ValueError("invalid channel state")
+
+                    interval = validate_interval(
+                        raw_channel.get(
+                            "interval_minutes", self.DEFAULT_INTERVAL_MINUTES
+                        )
+                    )
+                    emoji = raw_channel.get("emoji")
+                    if emoji is not None and not isinstance(emoji, str):
+                        raise ValueError("channel emoji must be a string or null")
+
                     if "cursor_utc" in raw_channel:
                         cursor = self._parse_utc_timestamp(raw_channel["cursor_utc"])
                     elif schema_version is None:
@@ -201,32 +247,40 @@ class NotificationService:
                     )
                     channels[user] = Channel(
                         user=user,
-                        interval_minutes=raw_channel.get(
-                            "interval_minutes", self.DEFAULT_INTERVAL_MINUTES
-                        ),
-                        emoji=raw_channel.get("emoji"),
+                        interval_minutes=interval,
+                        emoji=emoji,
                         processed_events=processed,
                         processed_event_times=processed_times,
                         last_check=cursor,
                     )
-            elif chat_id is not None:
+            else:
+                if schema_version is not None:
+                    raise ValueError("current notification state is missing channels")
                 # Плоская схема становится личным каналом с одним migration-baseline.
+                interval = validate_interval(
+                    data.get("interval_minutes", self.DEFAULT_INTERVAL_MINUTES)
+                )
                 raw = data.get("processed_events", data.get("processed_ids", []))
                 processed, processed_times = self._load_processed_events(raw, baseline)
-                channels[PERSONAL] = Channel(
-                    user=PERSONAL,
-                    interval_minutes=data.get(
-                        "interval_minutes", self.DEFAULT_INTERVAL_MINUTES
-                    ),
-                    emoji=None,
-                    processed_events=processed,
-                    processed_event_times=processed_times,
-                    last_check=baseline,
-                )
-                migration_needed = True
-        except Exception:
-            # Не запускаем каналы из частично или неоднозначно прочитанного состояния.
-            logger.exception("Error loading notification state; polling disabled")
+                if chat_id is not None:
+                    channels[PERSONAL] = Channel(
+                        user=PERSONAL,
+                        interval_minutes=interval,
+                        emoji=None,
+                        processed_events=processed,
+                        processed_event_times=processed_times,
+                        last_check=baseline,
+                    )
+                    migration_needed = True
+        except Exception as error:
+            # Не логируем значения из потенциально повреждённого файла.
+            self._state_load_error = StateLoadError(
+                "Сохранённое состояние уведомлений не прошло проверку"
+            )
+            logger.error(
+                "Error loading notification state; polling disabled (error_type=%s)",
+                type(error).__name__,
+            )
             return
 
         self._chat_id = chat_id
@@ -243,6 +297,15 @@ class NotificationService:
                 logger.exception("Error persisting migrated notification state")
         if chat_id is not None:
             logger.info("Restored %d channel(s) (chat_id=%s)", len(channels), chat_id)
+
+    @staticmethod
+    def _validate_state_identity(value: object, field: str) -> str:
+        """Проверяет минимум, общий для persisted Jira identities."""
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field} must be a non-empty string")
+        if any(unicodedata.category(character) == "Cc" for character in value):
+            raise ValueError(f"{field} must not contain control characters")
+        return value
 
     @staticmethod
     def _format_utc_timestamp(value: datetime) -> str:
@@ -268,7 +331,10 @@ class NotificationService:
         processed: dict[str, set[str]] = {}
         times: dict[str, dict[str, datetime]] = {}
         if isinstance(raw, list):
-            # Совсем старый глобальный список нельзя безопасно привязать к задачам.
+            # Совсем старый глобальный список нельзя безопасно привязать к задачам,
+            # но его элементы всё равно должны соответствовать старой схеме.
+            if not all(isinstance(event_id, str) for event_id in raw):
+                raise ValueError("event id must be a string")
             return processed, times
         if not isinstance(raw, dict):
             raise ValueError("processed_events must be an object")
@@ -354,6 +420,8 @@ class NotificationService:
 
     def _write_state(self, payload: str) -> None:
         """Атомарно пишет уже сериализованную строку (может выполняться в to_thread)."""
+        if self._state_load_error is not None:
+            raise self._state_load_error
         state_file = self._state_path()
         state_file.parent.mkdir(parents=True, exist_ok=True)
         # Пишем во временный файл и атомарно подменяем — иначе падение бота посреди
@@ -388,6 +456,8 @@ class NotificationService:
                 break
         try:
             write_task.result()
+        except StateLoadError:
+            raise
         except Exception as error:
             logger.exception("Error saving state")
             raise StateSaveError("Не удалось записать состояние") from error
@@ -541,6 +611,8 @@ class NotificationService:
         self, user: str, emoji: str | None = None, interval: int | None = None
     ) -> Channel:
         """Создаёт или обновляет канал коллеги; subscribed chat уже должен быть привязан."""
+        if interval is not None:
+            interval = validate_interval(interval)
         async with self._lifecycle_lock:
             if self._chat_id is None:
                 raise RuntimeError("Cannot add a channel without a subscribed chat")
@@ -552,6 +624,8 @@ class NotificationService:
         self, chat_id: int, user: str, emoji: str | None = None, interval: int | None = None
     ) -> TrackOutcome:
         """Проверяет Jira без привязки, затем атомарно перепроверяет chat и создаёт канал."""
+        if interval is not None:
+            interval = validate_interval(interval)
         async with self._lifecycle_lock:
             if self._chat_id is not None and self._chat_id != chat_id:
                 return TrackOutcome("chat_busy")
@@ -684,6 +758,8 @@ class NotificationService:
 
     async def subscribe(self, chat_id: int, interval_minutes: int | None = None) -> bool:
         """Подписывает личный канал. False — чат занят другим или уже подписан."""
+        if interval_minutes is not None:
+            interval_minutes = validate_interval(interval_minutes)
         async with self._lifecycle_lock:
             return await self._subscribe_locked(chat_id, interval_minutes)
 
@@ -729,6 +805,7 @@ class NotificationService:
 
     async def update_interval(self, chat_id: int, interval_minutes: int) -> bool:
         """Обновляет интервал личного канала без замены объекта Channel."""
+        interval_minutes = validate_interval(interval_minutes)
         async with self._lifecycle_lock:
             return await self._update_interval_locked(chat_id, interval_minutes)
 
@@ -736,6 +813,8 @@ class NotificationService:
         self, chat_id: int, interval_minutes: int | None = None
     ) -> EnableOutcome:
         """Включает/обновляет personal channel одной lifecycle-транзакцией."""
+        if interval_minutes is not None:
+            interval_minutes = validate_interval(interval_minutes)
         async with self._lifecycle_lock:
             if self._chat_id is not None and self._chat_id != chat_id:
                 return EnableOutcome("chat_busy")
@@ -794,6 +873,8 @@ class NotificationService:
 
     def start(self, bot: Bot) -> None:
         """Запускает фоновые задачи по всем активным каналам."""
+        if self._state_load_error is not None:
+            raise self._state_load_error
         self._bot = bot
         for channel in self._channels.values():
             self._start_channel_task(channel)

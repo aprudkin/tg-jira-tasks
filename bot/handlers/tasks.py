@@ -9,9 +9,10 @@ from aiogram.types import Message
 from aiogram.utils.formatting import Bold, Text
 
 from bot import status
+from bot.intervals import MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, validate_interval
 from bot.render import issue_ref, join_text, split_message
 from bot.services.jira import IncompleteJiraDataError, jira_service, JiraTask
-from bot.services.notifications import notification_service, PERSONAL, StateSaveError
+from bot.services.notifications import notification_service, PERSONAL, StateLoadError, StateSaveError
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,10 @@ router = Router()
 JIRA_ERROR_MESSAGE = "⚠️ Could not reach Jira. Try again later."
 JIRA_INCOMPLETE_MESSAGE = "⚠️ Jira data could not be processed safely. No partial result was shown."
 STATE_SAVE_ERROR_MESSAGE = "⚠️ Не удалось сохранить изменения. Попробуй ещё раз."
+STATE_LOAD_ERROR_MESSAGE = (
+    "⚠️ Сохранённое состояние уведомлений не удалось загрузить. "
+    "Нужно исправить или восстановить файл состояния и перезапустить бот."
+)
 
 # Текст loading-сообщения для большинства команд
 LOADING_TASKS = "Loading tasks..."
@@ -45,7 +50,7 @@ def _is_marker(token: str) -> bool:
 def parse_track_args(args: str) -> tuple[str, str | None, int | None]:
     """Разбирает аргументы /track: '<user> [эмодзи] [интервал]' (хвост — в любом порядке).
 
-    Токены после user определяются по типу: число → интервал (>=1), иначе → маркер.
+    Токены после user определяются по типу: число → интервал (1–1440), иначе → маркер.
     Возвращает (user, emoji|None, interval|None). Бросает ValueError при пустом вводе,
     нулевом/отрицательном интервале или нераспознанном (не-эмодзи) аргументе.
     """
@@ -58,10 +63,7 @@ def parse_track_args(args: str) -> tuple[str, str | None, int | None]:
     interval: int | None = None
     for token in tokens[1:]:
         if token.isdigit():
-            value = int(token)
-            if value < 1:
-                raise ValueError("interval must be at least 1 minute")
-            interval = value
+            interval = validate_interval(int(token))
         elif emoji is None and _is_marker(token):
             emoji = token
         else:
@@ -306,19 +308,20 @@ async def cmd_sync(message: Message, command: CommandObject) -> None:
     interval_minutes: int | None = None
     if command.args:
         try:
-            interval_minutes = int(command.args.strip())
-            if interval_minutes < 1:
-                await message.answer("Interval must be at least 1 minute.")
-                return
+            interval_minutes = validate_interval(int(command.args.strip()))
         except ValueError:
             await message.answer(
-                "Invalid interval. Usage: /sync [minutes]\n"
+                f"Invalid interval: use {MIN_INTERVAL_MINUTES}–{MAX_INTERVAL_MINUTES} minutes. "
+                "Usage: /sync [minutes]\n"
                 f"Example: /sync 15 (default: {notification_service.DEFAULT_INTERVAL_MINUTES})"
             )
             return
 
     try:
         outcome = await notification_service.enable_personal(chat_id, interval_minutes)
+    except StateLoadError:
+        await message.answer(STATE_LOAD_ERROR_MESSAGE)
+        return
     except StateSaveError:
         logger.exception("Failed to persist sync")
         await message.answer(STATE_SAVE_ERROR_MESSAGE)
@@ -357,6 +360,9 @@ async def cmd_unsync(message: Message) -> None:
 
     try:
         removed = await notification_service.unsubscribe(chat_id)
+    except StateLoadError:
+        await message.answer(STATE_LOAD_ERROR_MESSAGE)
+        return
     except StateSaveError:
         logger.exception("Failed to persist unsync")
         await message.answer(STATE_SAVE_ERROR_MESSAGE)
@@ -368,7 +374,11 @@ async def cmd_unsync(message: Message) -> None:
         await message.answer("Failed to disable notifications.")
 
 
-TRACK_USAGE = "Usage: /track <jira-user> [эмодзи] [интервал]\nПример: /track jdoe 🔵 15"
+TRACK_USAGE = (
+    "Usage: /track <jira-user> [эмодзи] [интервал]\n"
+    f"Интервал: {MIN_INTERVAL_MINUTES}–{MAX_INTERVAL_MINUTES} минут.\n"
+    "Пример: /track jdoe 🔵 15"
+)
 
 
 @router.message(Command("track"))
@@ -390,6 +400,9 @@ async def cmd_track(message: Message, command: CommandObject) -> None:
 
     try:
         outcome = await notification_service.track_colleague(message.chat.id, user, emoji, interval)
+    except StateLoadError:
+        await message.answer(STATE_LOAD_ERROR_MESSAGE)
+        return
     except StateSaveError:
         logger.exception("Failed to persist track for %s", user)
         await message.answer(STATE_SAVE_ERROR_MESSAGE)
@@ -431,6 +444,9 @@ async def cmd_untrack(message: Message, command: CommandObject) -> None:
     user = command.args.strip().split()[0]
     try:
         removed = await notification_service.remove_channel(message.chat.id, user)
+    except StateLoadError:
+        await message.answer(STATE_LOAD_ERROR_MESSAGE)
+        return
     except StateSaveError:
         logger.exception("Failed to persist untrack for %s", user)
         await message.answer(STATE_SAVE_ERROR_MESSAGE)
@@ -510,6 +526,9 @@ async def cmd_silent(message: Message, command: CommandObject) -> None:
 
     try:
         await notification_service.mute_user(target_user)
+    except StateLoadError:
+        await message.answer(STATE_LOAD_ERROR_MESSAGE)
+        return
     except StateSaveError:
         logger.exception("Failed to persist silent")
         await message.answer(STATE_SAVE_ERROR_MESSAGE)
@@ -532,6 +551,9 @@ async def cmd_unsilent(message: Message, command: CommandObject) -> None:
 
     try:
         await notification_service.unmute_user(target_user)
+    except StateLoadError:
+        await message.answer(STATE_LOAD_ERROR_MESSAGE)
+        return
     except StateSaveError:
         logger.exception("Failed to persist unsilent")
         await message.answer(STATE_SAVE_ERROR_MESSAGE)

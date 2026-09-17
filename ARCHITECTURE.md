@@ -220,7 +220,7 @@ Each poll replays the overlapping UTC window `(last_check - 10 minutes, window_e
 
 ### State Persistence
 
-The JSON state contains the subscribed chat, all channel definitions, each channel's UTC cursor and timestamped per-issue event IDs, and the cross-channel set of muted authors. Writes use a temporary file followed by an atomic replacement. Loading also migrates the former flat schema into the personal `__me__` channel.
+The JSON state contains the subscribed chat, all channel definitions, each channel's UTC cursor and timestamped per-issue event IDs, and the cross-channel set of muted authors. Writes use a temporary file followed by an atomic replacement. Loading validates the complete snapshot before publishing any state and also migrates the former flat schema into the personal `__me__` channel. Invalid state remains unchanged on disk, exposes a `StateLoadError`, and blocks startup and writes until repaired and restarted. Sync-channel intervals are strictly integer minutes in the shared range 1–1440, checked by handlers, service boundaries, and state loading.
 
 Channel/chat mutations and muted-author changes are serialized by a lifecycle lock. Jira visibility probes run outside this lock and do not bind a chat; `/track` rechecks ownership after the probe. A candidate snapshot is atomically persisted before settings are published or new channel tasks start. Existing channel objects retain their identity. Removal fences and drains the channel before committing; a failed write restores its activity. An in-flight disk write is awaited even on cancellation, and a successful write is published before cancellation propagates.
 

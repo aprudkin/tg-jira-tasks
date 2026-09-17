@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -31,6 +32,14 @@ def _jql_in(field: str, statuses: tuple[str, ...], negate: bool = False) -> str:
     values = ", ".join(f'"{s}"' for s in statuses)
     op = "not in" if negate else "in"
     return f"{field} {op} ({values})"
+
+
+def _jql_identity_literal(identity: str) -> str:
+    """Безопасно представляет Jira username/accountId как строковый JQL-литерал."""
+    if any(unicodedata.category(character) == "Cc" for character in identity):
+        raise ValueError("JQL identity must not contain control characters")
+    escaped = identity.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 @dataclass
@@ -295,7 +304,7 @@ class JiraService:
 
     def _has_visible_assigned_tasks_sync(self, user: str) -> bool:
         """Выполняет ограниченную пробу Jira для /track."""
-        jql = f'assignee = "{user}"'
+        jql = f"assignee = {_jql_identity_literal(user)}"
         if getattr(self.client, "_is_cloud", False) is True:
             response = self.client.enhanced_search_issues(
                 jql,
@@ -505,7 +514,8 @@ class JiraService:
             # Канал коллеги: только назначенные на него (ADR-0001) — это и «его тикеты»
             # по смыслу, и обход прав Manage Watchers (watcher по чужому юзеру не спрашиваем).
             assign_target = target
-            jql = f'assignee = "{target}" AND updated >= "{lookback}" ORDER BY updated DESC'
+            target_literal = _jql_identity_literal(target)
+            jql = f'assignee = {target_literal} AND updated >= "{lookback}" ORDER BY updated DESC'
 
         issues = self._search_issue_pages(
             jql,

@@ -38,6 +38,11 @@ BOT_COMMANDS = [
 
 async def main() -> None:
     """Точка входа в приложение."""
+    # Ошибка локального состояния должна проявиться до обращения к Telegram.
+    state_error = notification_service.state_load_error
+    if state_error is not None:
+        raise state_error
+
     # Создание бота с настройками по умолчанию
     bot = Bot(token=settings.telegram_token)
     dp = Dispatcher()
