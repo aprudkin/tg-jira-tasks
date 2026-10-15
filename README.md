@@ -108,7 +108,7 @@ GitHub Actions на каждый push и pull request повторяет locked 
 
 Dependabot еженедельно предлагает обновления Python-зависимостей, GitHub Actions и Docker images. Вручную обновляйте один пакет через `uv lock --upgrade-package <package>`, весь набор — через `uv lock --upgrade`; не редактируйте lock вручную. Проверяйте diff и повторяйте команды установки, тестов, security-проверки и сборки выше. Для Docker сохраняйте точный version tag и проверенный registry digest; Actions закреплены commit SHA. Поддерживаемая версия runtime — Python 3.11.
 
-Обзор компонентов и runtime-контрактов: [ARCHITECTURE.md](ARCHITECTURE.md). Термины предметной области: [CONTEXT.md](CONTEXT.md). Инструкции для агентов: [AGENTS.md](AGENTS.md).
+Обзор компонентов и runtime-контрактов: [ARCHITECTURE.md](ARCHITECTURE.md). Термины предметной области: [CONTEXT.md](CONTEXT.md).
 
 ## Лицензия
 
