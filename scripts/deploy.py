@@ -14,6 +14,7 @@ DEPLOY_PATHS = (
     ".dockerignore",
     "Dockerfile",
     "docker-compose.yml",
+    "docker-compose.nc.yml",
     "pyproject.toml",
     "uv.lock",
     "bot",
@@ -30,10 +31,10 @@ RECEIVER_FILTER_RULES = (
     "R /scripts/***",
     "P /*",
 )
-DEFAULT_HOST = "sf-bot-app01"
-DEFAULT_DESTINATION = "root@143.110.233.82:/root/tg-jira-tasks/"
+DEFAULT_HOST = "nc-bot-01"
+DEFAULT_DESTINATION = "nc-bot-01:/srv/tg-jira-bot/"
 DEFAULT_RSYNC_SHELL = (
-    f"ssh -i {Path.home()}/.ssh/luk -o StrictHostKeyChecking=accept-new"
+    f"ssh -i {Path.home()}/.ssh/luk -o BatchMode=yes -o StrictHostKeyChecking=yes"
 )
 
 
@@ -99,6 +100,7 @@ def rsync_command(
         "-avzc",
         "--delete",
         "--itemize-changes",
+        "--rsync-path=sudo -n rsync",
     ]
     if dry_run:
         command.append("--dry-run")
@@ -108,25 +110,40 @@ def rsync_command(
     return command
 
 
+def elevated_body(source: Path, destination: Path) -> Path:
+    """The SSH alias uses ops; elevation stays explicit and non-interactive."""
+    destination.write_text("#!/bin/sh\nexec sudo -n bash <<'TG_JIRA_DEPLOY_BODY'\n" + source.read_text() + "\nTG_JIRA_DEPLOY_BODY\n")
+    return destination
+
+
 def deploy(repo: Path, *, revision: str, dry_run: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="tg-jira-deploy-") as temporary:
-        staging = Path(temporary)
+        workspace = Path(temporary)
+        staging = workspace / "payload"
+        staging.mkdir()
         resolved = stage_snapshot(repo, revision, staging)
         print(f"Deploy snapshot: {resolved}")
         print("Allowlisted payload:")
         for path in (*DEPLOY_PATHS, DEPLOY_METADATA):
             print(f"  {path}")
 
-        # sshai is the command transport; rsync keeps its documented raw SSH transport.
-        run(["sshai", "run", "--body-file", str(staging / "scripts/deploy-preflight.sh"), DEFAULT_HOST])
+        # Wrappers remain outside the allowlisted upload directory.
+        preflight = elevated_body(staging / "scripts/deploy-preflight.sh", workspace / "preflight.sh")
+        remote_body = elevated_body(staging / "scripts/deploy-remote.sh", workspace / "remote.sh")
+        try:
+            run(["sshai", "run", "--body-file", str(preflight), DEFAULT_HOST])
+        finally:
+            preflight.unlink(missing_ok=True)
 
         print("Rsync dry-run (protected server-only paths are omitted from deletion):")
         run(rsync_command(staging, DEFAULT_DESTINATION, dry_run=True))
         if dry_run:
+            remote_body.unlink(missing_ok=True)
             return
 
         run(rsync_command(staging, DEFAULT_DESTINATION, dry_run=False))
-        run(["sshai", "run", "--timeout", "300", "--body-file", str(staging / "scripts/deploy-remote.sh"), DEFAULT_HOST])
+        run(["sshai", "run", "--timeout", "300", "--body-file", str(remote_body), DEFAULT_HOST])
+        remote_body.unlink(missing_ok=True)
 
 
 def main() -> int:

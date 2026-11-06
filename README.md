@@ -2,6 +2,14 @@
 
 Telegram-бот на Python 3.11 и aiogram 3 для просмотра задач Jira и доставки изменений в Telegram. Поддерживает Jira Cloud и Jira Data Center, личный канал и независимые каналы отслеживаемых коллег.
 
+## Production
+
+С 06.11.2026 бот работает на `nc-bot-01` в `/srv/tg-jira-bot`.
+Контейнер `tg-jira-bot`, state volume `tg_jira_bot_data`, сеть `tg-jira`.
+Секреты — серверный `runtime.env`; доступ через `ops` и sudo. Production использует
+`docker-compose.nc.yml`; прежний сервер выведен из эксплуатации для этого бота.
+Подробности миграции и актуальные команды — в [DEPLOY.md](DEPLOY.md).
+
 ## Быстрый запуск
 
 Требуются Docker с Compose, Telegram bot token и один из поддерживаемых вариантов авторизации Jira.

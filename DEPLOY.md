@@ -1,157 +1,98 @@
-# Деплой бота (Docker)
+# Деплой бота на nc-bot-01
 
-## Инфраструктура и границы
+## Текущая установка
 
-| Сервер | SSH alias | Каталог | Контейнер | State volume |
-|---|---|---|---|---|
-| sf-bot-app01 (`143.110.233.82`) | `sf-bot-app01` | `/root/tg-jira-tasks` | `tg-jira-bot` | `tg-jira-tasks_bot_data` |
+Миграция выполнена 06.11.2026. Владелец проверил `/start` у `@quiet_whisper_bot`.
+Старые контейнер, state volume и deployment directory удалены.
 
-Сервер также обслуживает `example_bot`. Деплой управляет только сервисом `bot`,
-не выполняет `docker compose down` и не затрагивает другие Compose-проекты.
-Состояние уведомлений находится в named volume по пути
-`/app/data/sync_state.json`, а не в синхронизируемом каталоге.
+| Объект | Значение |
+| --- | --- |
+| SSH | `nc-bot-01`, пользователь `ops`, ключ `~/.ssh/luk`, strict host checking |
+| Управление | Явное `sudo -n`; root SSH не используется |
+| Каталог | `/srv/tg-jira-bot` |
+| Контейнер / Compose project | `tg-jira-bot` / `tg_jira` |
+| Production Compose | `docker-compose.nc.yml`; локальный `docker-compose.yml` остаётся dev-конфигурацией |
+| Секреты | `/srv/tg-jira-bot/runtime.env`, root:root, 0600; значения не хранятся в Git |
+| State | External volume `tg_jira_bot_data`, `/app/data/sync_state.json` |
+| Сеть | External network `tg-jira`, `br-tgjira`, `172.29.42.0/24`, без опубликованных портов |
+| Runtime | UID/GID 10001:10001, read-only root, cap-drop ALL, no-new-privileges |
+| Лимиты | 256 MiB, 0.5 CPU, 128 PID; writable state volume и `/tmp` tmpfs |
+| Логи | Docker `local`, 10 MiB × 3 файла |
 
-Для команд на сервере workflow использует `sshai` с настроенным alias
-`sf-bot-app01`. Только `rsync` использует документированный raw SSH transport с
-ключом `~/.ssh/luk` и существующей политикой host key. Не меняй SSH-настройки в
-рамках обычного деплоя.
+На том же хосте работают `example_bot` и его PostgreSQL. Workflow управляет
+только сервисом `bot`: не выполняет общий `compose down` и не меняет другие
+контейнеры/volumes. Для Jira отдельная сеть с DNS/HTTPS egress; состояние
+уведомлений находится вне синхронизируемого каталога.
 
-## Что переносится
+## Выполненный перенос
 
-`task deploy` всегда архивирует **закоммиченный `HEAD`**, а не рабочее дерево.
-Allowlist находится в `scripts/deploy.py` и ограничен:
+Перенесён точный рабочий образ ревизии
+`dec0f9bdebb24cb078a2d81d02403d9dcdb48a6c`, image ID
+`sha256:f2712a6174bcef2bc3395d0ae782d10f41477f3a26052fc7d7210988264e661b`.
+Текущий локальный tag — `tg-jira-bot:dec0f9bdebb2`.
 
-- `.dockerignore`, `Dockerfile`, `docker-compose.yml`;
-- `pyproject.toml`, `uv.lock`;
-- `bot/`;
-- deployment helpers из `scripts/`;
-- сгенерированным `.deploy-revision` с полным commit SHA.
+Старый экземпляр штатно остановлен перед финальным копированием state. Файл
+совпал побайтно, schema 2 прошла serialize/load roundtrip кодом того же образа.
+Сохранены subscribed chat, канал, interval, marker, cursor и dedup state.
+После старта cursor не откатился назад, polling работает, restart count 0.
+Telegram getMe/getWebhookInfo и Jira myself доступны с нового сервера; владелец
+подтвердил обычное меню. Между остановкой старого и стартом нового контейнера
+прошло около 25 секунд.
 
-Поэтому untracked-файлы, `.env*`, `.pi/`, `.memory/`, тестовые артефакты и
-локальные credentials не могут попасть в payload. `.dockerignore` также
-запрещает build context по умолчанию и разрешает только файлы приложения,
-нужные Dockerfile.
+Приватные материалы переноса: `/root/nc-followup-20261106T050032Z/` на новом
+сервере. Внешний backup и внешнее хранилище исключены из этого объёма работ.
+`/srv/tg-jira-bot/source` — исторический source snapshot старой установки;
+находящиеся в нём прежние команды с адресом старого сервера не используются.
 
-Receiver-side фильтры ограничивают `rsync --delete`: устаревшие файлы удаляются
-только внутри управляемых `bot/` и `scripts/`. Все остальные корневые пути на
-сервере защищены, включая `.env*`, `.pi/`, `.memory/`, `backups/`, `secrets/`,
-`data/`, документацию и файлы других workflows.
-
-## Только обновление существующей установки
-
-`task deploy` и `task deploy:dry` поддерживают только уже установленный bot.
-Preflight требует существующие `/root/tg-jira-tasks`, `.env`,
-`docker-compose.yml`, валидный Compose project и не более одного bot-контейнера.
-Bootstrap нового хоста этим workflow намеренно не поддерживается: подготовка
-production `.env`, первого Compose project и state volume остаётся отдельной
-ручной операцией. Не обходи preflight копированием credentials через `sshai`.
-
-## Обычный деплой
+## Обновление существующей установки
 
 ```bash
-# Локальные проверки до коммита
 uv run --locked --group dev python -m pytest tests/ -v
-
-# После коммита: read-only preflight и точный rsync plan; production не меняется
+# После коммита:
 task deploy:dry
-
-# Тот же committed snapshot: upload, build, restart, readiness и rollback
 task deploy
 ```
 
-`task deploy` выполняет следующий порядок:
+`task deploy` архивирует только committed HEAD. Allowlist в `scripts/deploy.py`:
+Dockerfile, оба Compose-файла, `.dockerignore`, `pyproject.toml`, `uv.lock`, `bot/`,
+deployment helpers и `.deploy-revision`. Рабочие `.env*`, `runtime.env`, backups,
+state и agent runtime data в payload не попадают. Receiver-side filters допускают
+`rsync --delete` только внутри managed `bot/` и `scripts/`; остальные корневые
+пути защищены. Raw rsync transport использует SSH alias и `sudo -n rsync`.
 
-1. Создаёт временный allowlisted `git archive HEAD` и проверяет payload.
-2. Через `sshai` проверяет существующий Compose project, `.env`, не более одного
-   bot-контейнера и mount строго ожидаемого state volume. Значения environment
-   и state не выводятся.
-3. Показывает `rsync --dry-run`, затем синхронизирует тот же snapshot.
-4. Собирает image `tg-jira-tasks-bot:<commit SHA>`.
-5. Запускает secret-safe configuration check: pydantic проверяет известные
-   форматы и обязательный `ALLOWED_USERS` (либо явный `ALLOW_OPEN_ACCESS`), а
-   diagnostic проверяет непустое наличие обязательных настроек и допустимой
-   комбинации Jira-auth — без значений, URL, ID и длин. Это не проверка токенов
-   или сетевой доступности Jira/Telegram.
-6. Останавливает только `bot`, делает приватный backup state и проверяет
-   временную копию state новым image. Проверка также требует, чтобы сохранённый
-   положительный private chat ID оставался в `ALLOWED_USERS` (либо был разрешён
-   открытым режимом), а отрицательный group chat ID — в `ALLOWED_CHAT_IDS`.
-   Production state при этой проверке не мигрирует и значения ID не выводятся.
-7. Один раз меняет ownership только внутри `tg-jira-tasks_bot_data` на
-   `10001:10001` и доказывает чтение state/запись в каталог от runtime UID.
-8. Запускает ровно один контейнер новым image.
-9. До 90 секунд ждёт `Run polling for bot` только в логах после текущего
-   `StartedAt`; контейнер обязан всё время оставаться `running` без restart.
-   Поэтому нормальная начальная задержка Telegram учитывается, а старый marker
-   не даёт ложного успеха.
+Удалённые scripts выполняются через `sshai` на `nc-bot-01` с явным sudo wrapper.
+Preflight требует существующие production Compose, runtime.env и ожидаемый volume;
+bootstrap нового хоста не выполняется. Он не печатает интерполированную конфигурацию.
 
-Ненулевой код любого шага означает ошибку deployment. Скрипт не печатает логи
-бота автоматически: сетевой exception теоретически может включать чувствительный
-URL. Для расследования просматривай ограниченный фрагмент вручную, не публикуя
-его в issue.
+Сборка выполняется отдельным Docker-container BuildKit builder через сеть
+`example-bot-build`: default bridge на хосте отключён. Builder получает 2 GiB /
+2 CPU и удаляется после сборки. Runtime dependencies устанавливаются по lockfile.
 
-## Rollback
+До остановки bot новый image проверяет конфигурацию без вывода значений.
+После остановки создаётся приватная локальная копия state в
+`/srv/tg-jira-bot/backups/<revision>-<UTC timestamp>/`; проверка совместимости
+выполняется на временной копии. One-off state helpers используют network none.
+Затем проверяются runtime UID, writable state path, ровно один контейнер и
+`Run polling for bot` в логах только после его текущего StartedAt. Бюджет — 90 секунд.
 
-После остановки bot любой сбой удаляет неуспешный bot-контейнер, чтобы
-исключить две polling-реплики. Дальнейшее поведение зависит от snapshot:
+## Откат обновления
 
-- после успешного backup восстанавливается точная pre-deploy копия
-  `sync_state.json` (или его отсутствие), затем запускается предыдущий image и
-  повторяется readiness check по текущему `StartedAt`;
-- если read-only backup не завершился, state ещё не изменялся: restore не
-  выполняется, предыдущий image запускается на нетронутом state;
-- если restore завершился ошибкой, предыдущий image **не запускается** на
-  неопределённом state; bot остаётся остановлен и требуется ручное устранение.
+Сбой после остановки удаляет неуспешный контейнер. После успешного snapshot
+восстанавливается pre-deploy state, затем предыдущий image; если snapshot не
+завершился, нетронутый state сохраняется. Ошибка restore оставляет bot остановленным,
+не запускает старый image на неопределённом состоянии. Readiness проверяется снова.
 
-Backup хранится в `/root/tg-jira-tasks/backups/<revision>-<UTC timestamp>/` с
-закрытыми правами и защищён от `rsync --delete`. Восстановление старого state
-может повторно доставить событие: это ожидаемое следствие гарантии at-least-once
-из ADR-0003.
+Восстановление старого cursor может повторно доставить событие: гарантия остаётся
+at-least-once согласно ADR-0003. Изменение state schema требует отдельной проверки
+обратной совместимости. Это локальный rollback обновления, не внешний backup.
 
-Этот rollback локально проверяется на текущей state schema. Изменение
-`STATE_SCHEMA_VERSION` требует отдельной проверки обратной совместимости до
-деплоя; нельзя считать image rollback безопасным только из-за наличия backup.
-При первом install предыдущего image нет — автоматический image rollback тогда
-невозможен, о чём задача сообщает ошибкой.
-
-Для ручного rollback используй backup и предыдущий image по тому же порядку:
-сначала остановить/удалить `tg-jira-bot`, затем восстановить state, затем
-запустить **один** service `bot` и выполнить
-`scripts/wait_for_startup.py tg-jira-bot --timeout 90`. Не запускай второй
-контейнер параллельно с действующим Telegram polling.
-
-## Непривилегированный runtime
-
-Новый image запускает bot как фиксированный UID/GID `10001:10001` через
-Dockerfile `USER`. Compose намеренно не переопределяет image user: при rollback
-предыдущий image должен сохранить свой runtime contract (старый image был root).
-Deployment выполняет root только в коротких одноразовых контейнерах для
-backup/restore и bounded ownership migration dedicated volume. Проверка перед
-стартом подтверждает, что новый runtime UID читает state и пишет в каталог;
-основной контейнер нового image не root.
-
-## Безопасная диагностика
-
-Проверка конфигурации без вывода значений:
+## Диагностика
 
 ```bash
-sshai run --body-file - sf-bot-app01 <<'SH'
-set -e
-cd /root/tg-jira-tasks
-image=$(docker inspect --format '{{.Image}}' tg-jira-bot)
-BOT_IMAGE="$image" docker compose run --rm --no-deps \
-  --entrypoint python bot -m bot.config_check
-SH
+ssh nc-bot-01 'sudo -n docker inspect --format "{{.State.Status}} {{.RestartCount}}" tg-jira-bot'
+ssh nc-bot-01 'sudo -n docker compose --project-directory /srv/tg-jira-bot -f /srv/tg-jira-bot/docker-compose.nc.yml ps'
 ```
 
-Проверка статуса контейнера (не environment):
-
-```bash
-sshai run sf-bot-app01 -- \
-  docker inspect --format '{{.State.Status}} {{.RestartCount}}' tg-jira-bot
-```
-
-Никогда не используй `docker exec ... env`, `docker compose config` без
-подавления вывода или `grep TELEGRAM|JIRA`: такие команды раскрывают токены.
-State-проверка сообщает только compatible/incompatible и выполняется на копии;
-не выводи JSON, chat ID, tracked users или event data.
+Не печатайте `docker exec ... env`, `docker inspect` целиком, state JSON или
+`docker compose config` без `--quiet`: это раскрывает credentials и пользовательские
+данные. Startup helper сообщает статус, не публикуя raw application logs.

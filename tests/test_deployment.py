@@ -82,6 +82,7 @@ def test_rsync_preserves_server_secrets_backups_and_state(tmp_path):
 
     protected = {
         ".env": "TOKEN=production\n",
+        "runtime.env": "TOKEN=production-runtime\n",
         ".env.local": "TOKEN=local\n",
         ".env.bak": "TOKEN=backup\n",
         "server-only.bak": "backup\n",
@@ -443,3 +444,24 @@ def test_startup_wait_rejects_exit_without_historical_log_match():
     assert not startup.wait_for_startup(
         "bot", 10, 2, docker=docker, monotonic=clock.monotonic, sleep=clock.sleep
     )
+
+
+def test_production_defaults_use_new_host_sudo_and_existing_state():
+    assert deploy.DEFAULT_HOST == "nc-bot-01"
+    assert deploy.DEFAULT_DESTINATION == "nc-bot-01:/srv/tg-jira-bot/"
+    assert "StrictHostKeyChecking=yes" in deploy.DEFAULT_RSYNC_SHELL
+    assert "docker-compose.nc.yml" in deploy.DEPLOY_PATHS
+    command = deploy.rsync_command(Path("/synthetic"), deploy.DEFAULT_DESTINATION, dry_run=True)
+    assert "--rsync-path=sudo -n rsync" in command
+    preflight = (ROOT / "scripts/deploy-preflight.sh").read_text()
+    assert "volume=tg_jira_bot_data" in preflight
+    assert "$remote/runtime.env" in preflight
+    assert "143.110.233.82" not in preflight
+
+
+def test_remote_body_elevates_ops_without_changing_payload(tmp_path):
+    source = tmp_path / "source.sh"
+    source.write_text("set -eu\necho synthetic\n")
+    wrapper = deploy.elevated_body(source, tmp_path / "wrapper.sh")
+    assert "exec sudo -n bash" in wrapper.read_text()
+    assert source.read_text() in wrapper.read_text()

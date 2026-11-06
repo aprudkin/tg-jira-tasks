@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-remote=${DEPLOY_REMOTE:-/root/tg-jira-tasks}
+remote=${DEPLOY_REMOTE:-/srv/tg-jira-bot}
+export COMPOSE_FILE=docker-compose.nc.yml
 container=tg-jira-bot
-volume=tg-jira-tasks_bot_data
+volume=tg_jira_bot_data
 wait_timeout=${DEPLOY_WAIT_TIMEOUT:-90}
 new_image=''
 old_image=''
 backup_dir=''
 changed=0
 snapshot_ready=0
+builder=''
+cleanup_builder() {
+  if [[ -n "$builder" ]]; then docker buildx rm "$builder" >/dev/null 2>&1 || true; fi
+}
+trap cleanup_builder EXIT
 
 restore_state() {
-  docker run --rm --user 0 \
+  docker run --rm --network none --user 0 \
     -v "$volume:/data" -v "$backup_dir:/backup:ro" \
     --entrypoint python "$new_image" \
     -m bot.state_snapshot restore /data/sync_state.json /backup \
     || return 1
-  docker run --rm --user 0 -v "$volume:/data" \
+  docker run --rm --network none --user 0 -v "$volume:/data" \
     --entrypoint sh "$new_image" -ceu 'chown -R 10001:10001 /data'
 }
 
@@ -75,7 +81,11 @@ main() {
     old_image=$(docker inspect --format '{{.Image}}' "$container")
   fi
 
-  BOT_IMAGE="$new_image" docker compose build bot
+  builder="tg-jira-deploy-${revision:0:12}-$$"
+  docker buildx create --name "$builder" --driver docker-container \
+    --driver-opt network=example-bot-build --driver-opt memory=2g \
+    --driver-opt cpu-quota=200000 --bootstrap >/dev/null
+  docker buildx build --builder "$builder" --load -t "$new_image" .
   BOT_IMAGE="$new_image" docker compose run --rm --no-deps \
     --entrypoint python bot -m bot.config_check
 
@@ -88,14 +98,14 @@ main() {
   docker compose stop bot
   changed=1
 
-  docker run --rm --user 0 \
+  docker run --rm --network none --user 0 \
     -v "$volume:/data:ro" -v "$backup_dir:/backup" \
     --entrypoint python "$new_image" \
     -m bot.state_snapshot backup /data/sync_state.json /backup
   snapshot_ready=1
 
   # Validate only a temporary copy: compatibility checks never migrate production state.
-  docker run --rm --user 0 --env-file .env \
+  docker run --rm --network none --user 0 --env-file runtime.env \
     -e STATE_FILE=/tmp/state/sync_state.json \
     -v "$volume:/source:ro" --entrypoint sh "$new_image" -ceu '
       mkdir -p /tmp/state
@@ -106,11 +116,11 @@ main() {
     '
 
   # One-time migration is constrained to the dedicated bot_data volume.
-  docker run --rm --user 0 -v "$volume:/app/data" \
+  docker run --rm --network none --user 0 -v "$volume:/app/data" \
     --entrypoint sh "$new_image" -ceu 'chown -R 10001:10001 /app/data'
 
   # Prove the runtime UID can read state and atomically create files in its directory.
-  docker run --rm --user 10001:10001 -v "$volume:/app/data" \
+  docker run --rm --network none --user 10001:10001 -v "$volume:/app/data" \
     --entrypoint sh "$new_image" -ceu '
       test ! -f /app/data/sync_state.json || test -r /app/data/sync_state.json
       probe=$(mktemp /app/data/.deploy-write.XXXXXX)
