@@ -59,6 +59,7 @@ deployment helpers и `.deploy-revision`. Рабочие `.env*`, `runtime.env`,
 state и agent runtime data в payload не попадают. Receiver-side filters допускают
 `rsync --delete` только внутри managed `bot/` и `scripts/`; остальные корневые
 пути защищены. Raw rsync transport использует SSH alias и `sudo -n rsync`.
+Permissions/owner/group существующих файлов и каталога не заменяются Mac UID/GID.
 
 Удалённые scripts выполняются через `sshai` на `nc-bot-01` с явным sudo wrapper.
 Preflight требует существующие production Compose, runtime.env и ожидаемый volume;

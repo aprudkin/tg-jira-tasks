@@ -453,6 +453,7 @@ def test_production_defaults_use_new_host_sudo_and_existing_state():
     assert "docker-compose.nc.yml" in deploy.DEPLOY_PATHS
     command = deploy.rsync_command(Path("/synthetic"), deploy.DEFAULT_DESTINATION, dry_run=True)
     assert "--rsync-path=sudo -n rsync" in command
+    assert {"--no-perms", "--no-owner", "--no-group"} <= set(command)
     preflight = (ROOT / "scripts/deploy-preflight.sh").read_text()
     assert "volume=tg_jira_bot_data" in preflight
     assert "$remote/runtime.env" in preflight

@@ -98,6 +98,9 @@ def rsync_command(
     command = [
         "rsync",
         "-avzc",
+        "--no-perms",
+        "--no-owner",
+        "--no-group",
         "--delete",
         "--itemize-changes",
         "--rsync-path=sudo -n rsync",
