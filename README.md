@@ -105,10 +105,10 @@ Compose запускает бота и хранит состояние увед�
 uv sync --locked --group dev
 task test
 task security
-task docker:build
+docker compose build
 ```
 
-`task test` запускает полный pytest suite с fake Jira/Telegram и временным state, без production-секретов. `task security` запускает Bandit и audit экспортированных runtime-зависимостей. `task docker:build` проверяет secret-free image build. `task init` предназначен не для подготовки тестов: он собирает и запускает реальный bot stack.
+`task test` запускает полный pytest suite с fake Jira/Telegram и временным state, без production-секретов. `task security` запускает Bandit и audit экспортированных runtime-зависимостей. `docker compose build` проверяет сборку образа без production-секретов и не запускает контейнеры.
 
 GitHub Actions на каждый push и pull request повторяет locked install, полный test suite, security checks и Docker build, а также проверяет непривилегированного runtime user. Production deployment работает только с закоммиченным `HEAD`; безопасный порядок, readiness и rollback описаны в [DEPLOY.md](DEPLOY.md).
 

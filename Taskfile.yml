@@ -15,13 +15,6 @@ tasks:
     cmds:
       - task --list-all
 
-  init:
-    desc: Initialize development environment
-    cmds:
-      - task: docker:build
-      - task: docker:up
-      - echo "Bot stack is ready."
-
   test:
     desc: Run the full pytest suite in the locked uv environment
     cmds:
