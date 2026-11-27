@@ -15,13 +15,6 @@ tasks:
     cmds:
       - task --list-all
 
-  init:
-    desc: Initialize development environment
-    cmds:
-      - task: docker:build
-      - task: docker:up
-      - echo "Bot stack is ready."
-
   test:
     desc: Run the full pytest suite in the locked uv environment
     cmds:
@@ -55,7 +48,7 @@ tasks:
   deploy:
     desc: "Deploy committed HEAD to PROD with bounded payload, state backup, readiness check and rollback."
     dir: "{{.REPO_ROOT}}"
-    prompt: "Deploy committed HEAD to PROD (sf-bot-app01 / 143.110.233.82)?"
+    prompt: "Deploy committed HEAD to PROD (nc-bot-01 / /srv/tg-jira-bot)?"
     cmds:
       - python3 scripts/deploy.py
     interactive: true

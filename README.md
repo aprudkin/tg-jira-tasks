@@ -2,6 +2,14 @@
 
 Telegram-бот на Python 3.11 и aiogram 3 для просмотра задач Jira и доставки изменений в Telegram. Поддерживает Jira Cloud и Jira Data Center, личный канал и независимые каналы отслеживаемых коллег.
 
+## Production
+
+С 06.11.2026 бот работает на `nc-bot-01` в `/srv/tg-jira-bot`.
+Контейнер `tg-jira-bot`, state volume `tg_jira_bot_data`, сеть `tg-jira`.
+Секреты — серверный `runtime.env`; доступ через `ops` и sudo. Production использует
+`docker-compose.nc.yml`; прежний сервер выведен из эксплуатации для этого бота.
+Подробности миграции и актуальные команды — в [DEPLOY.md](DEPLOY.md).
+
 ## Быстрый запуск
 
 Требуются Docker с Compose, Telegram bot token и один из поддерживаемых вариантов авторизации Jira.
@@ -97,10 +105,10 @@ Compose запускает бота и хранит состояние увед�
 uv sync --locked --group dev
 task test
 task security
-task docker:build
+docker compose build
 ```
 
-`task test` запускает полный pytest suite с fake Jira/Telegram и временным state, без production-секретов. `task security` запускает Bandit и audit экспортированных runtime-зависимостей. `task docker:build` проверяет secret-free image build. `task init` предназначен не для подготовки тестов: он собирает и запускает реальный bot stack.
+`task test` запускает полный pytest suite с fake Jira/Telegram и временным state, без production-секретов. `task security` запускает Bandit и audit экспортированных runtime-зависимостей. `docker compose build` проверяет сборку образа без production-секретов и не запускает контейнеры.
 
 GitHub Actions на каждый push и pull request повторяет locked install, полный test suite, security checks и Docker build, а также проверяет непривилегированного runtime user. Production deployment работает только с закоммиченным `HEAD`; безопасный порядок, readiness и rollback описаны в [DEPLOY.md](DEPLOY.md).
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-remote=/root/tg-jira-tasks
+remote=/srv/tg-jira-bot
+export COMPOSE_FILE=docker-compose.nc.yml
 container=tg-jira-bot
-volume=tg-jira-tasks_bot_data
+volume=tg_jira_bot_data
 
 fail() {
   printf 'Preflight failed: %s\n' "$1" >&2
@@ -13,8 +14,8 @@ fail() {
 command -v docker >/dev/null || fail 'docker is unavailable'
 command -v python3 >/dev/null || fail 'python3 is unavailable'
 test -d "$remote" || fail 'existing deployment directory is missing'
-test -f "$remote/.env" || fail 'production environment file is missing'
-test -f "$remote/docker-compose.yml" \
+test -f "$remote/runtime.env" || fail 'production environment file is missing'
+test -f "$remote/docker-compose.nc.yml" \
   || fail 'existing Compose installation is missing; task deploy does not bootstrap a new host'
 
 # Do not render Compose configuration: it can contain environment values.

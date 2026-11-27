@@ -1,0 +1,34 @@
+name: tg_jira
+services:
+  bot:
+    container_name: tg-jira-bot
+    image: ${BOT_IMAGE:-tg-jira-bot:dec0f9bdebb2}
+    build: .
+    env_file:
+      - path: ./runtime.env
+        format: raw
+    user: "10001:10001"
+    restart: unless-stopped
+    stop_grace_period: 90s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    volumes:
+      - bot_data:/app/data
+    networks: [app]
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  app:
+    external: true
+    name: tg-jira
+volumes:
+  bot_data:
+    external: true
+    name: tg_jira_bot_data
